@@ -7,6 +7,17 @@ import logger from './utils/logger.js';
 const app: Express = express();
 const PORT: number = Number(process.env.PORT) || 3000;
 
+// Determine whether to trust proxy headers (needed for correct client IP detection
+// when running behind a reverse proxy / load balancer). This ensures express-rate-limit
+// can use X-Forwarded-For safely. Set TRUST_PROXY=true in environments like Heroku.
+const trustProxy = process.env.TRUST_PROXY === 'true' || process.env.NODE_ENV === 'production';
+if (trustProxy) {
+	// Trust the first proxy (typical for single-load-balancer setups)
+	app.set('trust proxy', 1);
+} else {
+	app.set('trust proxy', false);
+}
+
 // Security: hide framework fingerprint
 app.disable('x-powered-by');
 
@@ -23,6 +34,16 @@ app.use(
 		credentials: true,
 	})
 );
+
+// Detect ngrok browser-skip header for debugging convenience and log it.
+// This does not change behavior, only records when clients (like ngrok) send the header.
+app.use((req: Request, _res: Response, next: NextFunction) => {
+	const skipWarning = req.headers['ngrok-skip-browser-warning'];
+	if (skipWarning) {
+		logger.info({ header: skipWarning }, '🔄 ngrok-skip-browser-warning header detected');
+	}
+	next();
+});
 
 // Body parsing with size limit to mitigate large payload attacks
 app.use(express.json({ limit: '10kb' }));
