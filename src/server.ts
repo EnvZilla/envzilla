@@ -9,35 +9,13 @@ import cors from 'cors';
 import rateLimit from 'express-rate-limit';
 import logger from './utils/logger.js';
 import { verifySignature } from './middlewares/verifySignature.js';
+import { dispatchWebhookEvent, getDeploymentInfo, getAllDeployments, cleanupStaleDeployments } from './middlewares/dispatcherServer.js';
+import { performHealthCheck, logHealthStatus } from './utils/healthCheck.js';
 import { spawn } from 'child_process';
 import * as worker from './worker.js';
 
 const app: Express = express();
 const PORT: number = Number(process.env.PORT) || 3000;
-
-// In-memory mapping from pull request number -> deployment info.
-// This is intentionally simple for now; a real implementation should
-// persist this mapping in a durable store so it survives restarts.
-const deployments = new Map<number, { containerId?: string; hostPort?: number; createdAt: number }>();
-
-// Helper to run a local TypeScript script via `npx tsx` and collect logs.
-function runLocalScript(args: string[], cwd = process.cwd(), timeoutMs = 10 * 60 * 1000): Promise<{ code: number; stdout: string; stderr: string }> {
-	return new Promise((resolve, reject) => {
-		const child = spawn('npx', args, { cwd, stdio: ['ignore', 'pipe', 'pipe'] });
-		let stdout = '';
-		let stderr = '';
-		const timer = setTimeout(() => {
-			try { child.kill('SIGKILL'); } catch {}
-			reject(new Error(`Script ${args.join(' ')} timed out after ${timeoutMs}ms`));
-		}, timeoutMs);
-
-		child.stdout?.on('data', (b) => { const s = b.toString(); stdout += s; logger.info({ script: args.join(' '), chunk: s.trim() }, 'script stdout'); });
-		child.stderr?.on('data', (b) => { const s = b.toString(); stderr += s; logger.warn({ script: args.join(' '), chunk: s.trim() }, 'script stderr'); });
-
-		child.on('error', (err) => { clearTimeout(timer); reject(err); });
-		child.on('close', (code) => { clearTimeout(timer); resolve({ code: code ?? 0, stdout, stderr }); });
-	});
-}
 
 // Determine whether to trust proxy headers (needed for correct client IP detection
 // when running behind a reverse proxy / load balancer). This ensures express-rate-limit
@@ -92,83 +70,85 @@ app.get('/', (req: Request, res: Response) => {
 	res.json({ status: 'ok', message: 'EnvZilla API server' });
 });
 
-// GitHub webhook endpoint — verify signature and process payload
+// Health check endpoint
+app.get('/health', async (req: Request, res: Response) => {
+	try {
+		const health = await performHealthCheck();
+		const statusCode = health.status === 'healthy' ? 200 : 
+						   health.status === 'degraded' ? 206 : 503;
+		
+		res.status(statusCode).json(health);
+	} catch (error: any) {
+		logger.error({ error: error.message }, 'Health check failed');
+		res.status(503).json({
+			status: 'unhealthy',
+			timestamp: Date.now(),
+			error: 'Health check failed'
+		});
+	}
+});
+
+// Get deployment information for a specific PR
+app.get('/deployments/:prNumber', (req: Request, res: Response) => {
+	const prNumber = Number(req.params.prNumber);
+	if (isNaN(prNumber)) {
+		return res.status(400).json({ error: 'Invalid PR number' });
+	}
+
+	const deployment = getDeploymentInfo(prNumber);
+	if (!deployment) {
+		return res.status(404).json({ error: 'Deployment not found' });
+	}
+
+	res.json({
+		pr: prNumber,
+		status: deployment.status,
+		containerId: deployment.containerId,
+		hostPort: deployment.hostPort,
+		createdAt: new Date(deployment.createdAt).toISOString(),
+		branch: deployment.branch,
+		commitSha: deployment.commitSha
+	});
+});
+
+// Get all active deployments
+app.get('/deployments', (req: Request, res: Response) => {
+	const deployments = getAllDeployments();
+	const deploymentList = Array.from(deployments.entries()).map(([prNumber, deployment]) => ({
+		pr: prNumber,
+		status: deployment.status,
+		containerId: deployment.containerId,
+		hostPort: deployment.hostPort,
+		createdAt: new Date(deployment.createdAt).toISOString(),
+		branch: deployment.branch,
+		commitSha: deployment.commitSha
+	}));
+
+	res.json({
+		count: deploymentList.length,
+		deployments: deploymentList
+	});
+});
+
+// Manual cleanup endpoint for stale deployments
+app.post('/admin/cleanup', (req: Request, res: Response) => {
+	const maxAgeHours = Number(req.query.maxAge) || 24;
+	const maxAgeMs = maxAgeHours * 60 * 60 * 1000;
+	
+	const cleanedCount = cleanupStaleDeployments(maxAgeMs);
+	
+	res.json({
+		message: `Cleanup completed`,
+		cleanedDeployments: cleanedCount,
+		maxAgeHours
+	});
+});
+
+// Main GitHub webhook endpoint - now uses the comprehensive event dispatcher
 app.post(
 	'/webhooks/github',
 	verifySignature,
-	async (req: Request, res: Response) => {
-		const event = req.headers['x-github-event'] as string | undefined;
-		const { action, pull_request } = req.body as any;
-
-		logger.info({ topic: 'webhook', provider: 'github', event, action }, '📦 Verified GitHub Webhook Payload Received');
-
-		// Only process pull_request events
-		if (event !== 'pull_request' || !pull_request) {
-			res.status(200).send('Ignored');
-			return;
-		}
-
-		const prNumber: number = Number(pull_request.number);
-
-		try {
-			if (action === 'opened' || action === 'reopened' || action === 'synchronize') {
-				// Trigger build.ts which will build and run the container.
-				// We run it via npx tsx so it uses the local TypeScript scripts.
-				logger.info({ pr: prNumber }, 'Triggering build for PR');
-				// Delegate build work to worker module. Worker returns script stdout which
-				// may include container id and port — parse and record in deployments map.
-				worker.buildForPR(prNumber).then(result => {
-					if (result.code === 0) {
-						const out = result.stdout || '';
-						const mId = out.trim().split('\n').reverse().find(l => l.match(/^[a-f0-9]{12,64}$/i));
-						const portMatch = out.match(/Found free host port\s*:?\s*(\d+)/i);
-						const hostPort = portMatch ? Number(portMatch[1]) : undefined;
-						const containerId = mId || undefined;
-						deployments.set(prNumber, { containerId, hostPort, createdAt: Date.now() });
-						logger.info({ pr: prNumber, containerId, hostPort }, 'Build finished and deployment recorded');
-					} else {
-						logger.error({ pr: prNumber, code: result.code }, 'Build script failed');
-					}
-				}).catch(err => logger.error({ pr: prNumber, err }, 'Error running build script'));
-
-				res.status(202).json({ status: 'building' });
-				return;
-			}
-
-			if (action === 'closed' || action === 'merged') {
-				// Trigger destroy for the PR's container if we have one recorded.
-				const info = deployments.get(prNumber);
-				if (!info || !info.containerId) {
-					logger.warn({ pr: prNumber }, 'No deployment recorded for PR to destroy');
-					res.status(200).json({ status: 'no-deployment' });
-					return;
-				}
-
-				const containerId = info.containerId;
-				logger.info({ pr: prNumber, containerId }, 'Triggering destroy for PR');
-
-				worker.destroyForPR(containerId, prNumber).then(result => {
-					if (result.code === 0) {
-						deployments.delete(prNumber);
-						logger.info({ pr: prNumber, containerId }, 'Destroyed deployment for PR');
-					} else {
-						logger.error({ pr: prNumber, containerId, code: result.code }, 'Destroy script failed');
-					}
-				}).catch(err => logger.error({ pr: prNumber, err }, 'Error running destroy script'));
-
-				res.status(202).json({ status: 'destroying' });
-				return;
-			}
-
-			// Other PR actions: just acknowledge
-			res.status(200).json({ status: 'ignored-action', action });
-			return;
-		} catch (err: any) {
-			logger.error({ err, pr: prNumber }, 'Error handling webhook');
-			res.status(500).json({ error: err?.message || 'Internal error' });
-			return;
-		}
-	}
+	dispatchWebhookEvent
 );
 
 // 404 handler
@@ -186,6 +166,40 @@ app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
 
 app.listen(PORT, () => {
 	logger.info({ port: PORT }, `EnvZilla sample app roaring on port http://localhost:${PORT} — press CTRL+C to calm the beast`);
+	
+	// Start background cleanup job - runs every 6 hours
+	const cleanupInterval = setInterval(() => {
+		logger.info('🧹 Running scheduled cleanup of stale deployments');
+		try {
+			const cleanedCount = cleanupStaleDeployments();
+			if (cleanedCount > 0) {
+				logger.info({ cleanedCount }, 'Scheduled cleanup completed');
+			}
+		} catch (error: any) {
+			logger.error({ error: error.message }, 'Error during scheduled cleanup');
+		}
+	}, 6 * 60 * 60 * 1000); // 6 hours
+
+	// Start periodic health checks - runs every 5 minutes
+	const healthCheckInterval = setInterval(async () => {
+		try {
+			const health = await performHealthCheck();
+			logHealthStatus(health);
+		} catch (error: any) {
+			logger.error({ error: error.message }, 'Error during health check');
+		}
+	}, 5 * 60 * 1000); // 5 minutes
+
+	// Graceful shutdown
+	const shutdown = () => {
+		logger.info('Shutting down gracefully');
+		clearInterval(cleanupInterval);
+		clearInterval(healthCheckInterval);
+		process.exit(0);
+	};
+
+	process.on('SIGTERM', shutdown);
+	process.on('SIGINT', shutdown);
 });
 
 export default app;
