@@ -147,8 +147,21 @@ app.post('/admin/cleanup', (req: Request, res: Response) => {
 // Main GitHub webhook endpoint - now uses the comprehensive event dispatcher
 app.post(
 	'/webhooks/github',
+feat/verify-signature
 	verifySignature,
 	dispatchWebhookEvent
+	// Allow slightly larger payloads for webhooks while keeping global limit small
+	express.json({ limit: '100kb' }),
+	(req: Request, res: Response) => {
+		logger.info({ topic: 'webhook', provider: 'github' }, '📦 Received GitHub Webhook Payload');
+		// Also print the full payload to the terminal for debugging
+		// eslint-disable-next-line no-console
+		if (process.env.NODE_ENV !== 'production') {
+			console.dir(req.body, { depth: null });
+		}
+		res.status(200).send('Webhook received');
+	}
+develop
 );
 
 // 404 handler
