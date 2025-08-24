@@ -20,7 +20,10 @@ const deployments = new Map<number, DeploymentInfo>();
 function encryptData(data: string, key: string): EncryptedData {
   const algorithm = 'aes-256-gcm';
   const iv = crypto.randomBytes(16);
-  const cipher = crypto.createCipher(algorithm, key);
+  
+  // Create a 32-byte key from the provided key string
+  const keyBuffer = crypto.scryptSync(key, 'salt', 32);
+  const cipher = crypto.createCipheriv(algorithm, keyBuffer, iv);
   
   let encrypted = cipher.update(data, 'utf8', 'hex');
   encrypted += cipher.final('hex');
@@ -39,7 +42,10 @@ function encryptData(data: string, key: string): EncryptedData {
  */
 function decryptData(encryptedData: string, key: string, iv: string, tag: string): string {
   const algorithm = 'aes-256-gcm';
-  const decipher = crypto.createDecipher(algorithm, key);
+  
+  // Create a 32-byte key from the provided key string (same method as encryption)
+  const keyBuffer = crypto.scryptSync(key, 'salt', 32);
+  const decipher = crypto.createDecipheriv(algorithm, keyBuffer, Buffer.from(iv, 'hex'));
   
   decipher.setAuthTag(Buffer.from(tag, 'hex'));
   
