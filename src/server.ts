@@ -68,7 +68,7 @@ app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
 });
 
 app.listen(PORT, () => {
-	logger.info({ port: PORT }, `Server is running on http://localhost:${PORT}`);
+	logger.info({ port: PORT }, `EnvZilla sample app roaring on port http://localhost:${PORT} — press CTRL+C to calm the beast`);
 });
 
 export default app;
