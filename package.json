@@ -1,0 +1,39 @@
+{
+  "name": "envzilla",
+  "version": "1.0.0",
+  "description": "Stop waiting for staging servers. EnvZilla automatically creates isolated preview environments for every pull request, so you can test and merge with confidence.",
+  "homepage": "https://github.com/EnvZilla/envzilla#readme",
+  "bugs": {
+    "url": "https://github.com/EnvZilla/envzilla/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/EnvZilla/envzilla.git"
+  },
+  "license": "MIT",
+  "author": "envzilla",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "clean": "rimraf dist",
+    "build": "npm run clean && tsc -p tsconfig.json",
+    "start": "node dist/index.js",
+    "dev": "tsx watch src/index.ts",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "types": "dist/index.d.ts",
+  "engines": {
+    "node": ">=18"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.11",
+  "nodemon": "^3.1.10",
+  "rimraf": "^5.0.0",
+  "tsx": "^4.20.5",
+  "typescript": "^5.9.2"
+  },
+  "dependencies": {
+    "dockerode": "^4.0.7",
+    "express": "^5.1.0"
+  }
+}
