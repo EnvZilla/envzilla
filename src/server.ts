@@ -1,4 +1,9 @@
 import express, { Express, Request, Response, NextFunction } from 'express';
+// Load environment variables from .env as early as possible so process.env values
+// (for example TRUST_PROXY) are available when Express initializes and when
+// middleware like express-rate-limit inspects req.ip / X-Forwarded-For.
+import dotenv from 'dotenv';
+dotenv.config();
 import helmet from 'helmet';
 import cors from 'cors';
 import rateLimit from 'express-rate-limit';
@@ -6,6 +11,17 @@ import logger from './utils/logger.js';
 
 const app: Express = express();
 const PORT: number = Number(process.env.PORT) || 3000;
+
+// Determine whether to trust proxy headers (needed for correct client IP detection
+// when running behind a reverse proxy / load balancer). This ensures express-rate-limit
+// can use X-Forwarded-For safely. Set TRUST_PROXY=true in environments like Heroku.
+const trustProxy = process.env.TRUST_PROXY === 'true' || process.env.NODE_ENV === 'production';
+if (trustProxy) {
+	// Trust the first proxy (typical for single-load-balancer setups)
+	app.set('trust proxy', 1);
+} else {
+	app.set('trust proxy', false);
+}
 
 // Security: hide framework fingerprint
 app.disable('x-powered-by');
