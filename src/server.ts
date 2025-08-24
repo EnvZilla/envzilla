@@ -40,6 +40,20 @@ app.get('/', (req: Request, res: Response) => {
 	res.json({ status: 'ok', message: 'EnvZilla API server' });
 });
 
+// GitHub webhook endpoint — log payload for now
+app.post(
+	'/webhooks/github',
+	// Allow slightly larger payloads for webhooks while keeping global limit small
+	express.json({ limit: '100kb' }),
+	(req: Request, res: Response) => {
+		logger.info({ topic: 'webhook', provider: 'github' }, '📦 Received GitHub Webhook Payload');
+		// Also print the full payload to the terminal for debugging
+		// eslint-disable-next-line no-console
+		console.dir(req.body, { depth: null });
+		res.status(200).send('Webhook received');
+	}
+);
+
 // 404 handler
 app.use((req: Request, res: Response) => {
 	res.status(404).json({ error: 'Not Found' });
