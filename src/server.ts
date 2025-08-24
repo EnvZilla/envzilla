@@ -65,7 +65,9 @@ app.post(
 		logger.info({ topic: 'webhook', provider: 'github' }, '📦 Received GitHub Webhook Payload');
 		// Also print the full payload to the terminal for debugging
 		// eslint-disable-next-line no-console
-		console.dir(req.body, { depth: null });
+		if (process.env.NODE_ENV !== 'production') {
+			console.dir(req.body, { depth: null });
+		}
 		res.status(200).send('Webhook received');
 	}
 );
