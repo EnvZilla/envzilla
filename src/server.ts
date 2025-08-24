@@ -10,6 +10,7 @@ import rateLimit from 'express-rate-limit';
 import logger from './utils/logger.js';
 import { verifySignature } from './middlewares/verifySignature.js';
 import { spawn } from 'child_process';
+import * as worker from './worker.js';
 
 const app: Express = express();
 const PORT: number = Number(process.env.PORT) || 3000;
@@ -60,31 +61,23 @@ app.use(
 	cors({
 		origin: allowedOrigins,
 		methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-		allowedHeaders: ['Content-Type', 'Authorization'],
+		// Include GitHub webhook headers so preflight requests succeed when
+		// running in environments that enforce CORS for service-to-service calls.
+		allowedHeaders: ['Content-Type', 'Authorization', 'X-Hub-Signature-256', 'X-Hub-Signature', 'X-GitHub-Event'],
 		credentials: true,
 	})
 );
 
-// Capture raw body for webhook signature verification. This must run before
-// the JSON body parser so we can compute the HMAC over the exact bytes GitHub sent.
-app.use((req, _res, next) => {
-	const chunks: Uint8Array[] = [];
-	req.on('data', (chunk: Uint8Array) => chunks.push(chunk));
-	req.on('end', () => {
-		try {
-			const raw = Buffer.concat(chunks);
-			// Attach raw body where middleware can find it for signature verification
-			(req as any).rawBody = raw;
-		} catch (e) {
-			// ignore
-		}
-	});
-	// continue — express.json will still run after this middleware
-	next();
-});
-
-// Body parsing with size limit to mitigate large payload attacks
-app.use(express.json({ limit: '1mb' }));
+// Body parsing with size limit to mitigate large payload attacks. Use the
+// `verify` option to capture the raw request body buffer for HMAC
+// verification without consuming the stream twice.
+app.use(express.json({
+	limit: '1mb',
+	verify: (req: any, _res, buf: Buffer) => {
+		// Save raw buffer for signature verification middleware
+		req.rawBody = buf;
+	},
+}));
 
 // Basic rate limiter to slow down brute force / scraping
 const limiter = rateLimit({
@@ -122,12 +115,11 @@ app.post(
 				// Trigger build.ts which will build and run the container.
 				// We run it via npx tsx so it uses the local TypeScript scripts.
 				logger.info({ pr: prNumber }, 'Triggering build for PR');
-				// Spawn the script; don't block long-running build in the request — respond 202 and stream logs asynchronously.
-				runLocalScript(['tsx', 'build.ts']).then(result => {
+				// Delegate build work to worker module. Worker returns script stdout which
+				// may include container id and port — parse and record in deployments map.
+				worker.buildForPR(prNumber).then(result => {
 					if (result.code === 0) {
-						// Try to parse container id and port from stdout (build.ts prints info)
 						const out = result.stdout || '';
-						// crude parse: find line like 'Found free host port' or 'Container started' — adjust to your build.ts outputs
 						const mId = out.trim().split('\n').reverse().find(l => l.match(/^[a-f0-9]{12,64}$/i));
 						const portMatch = out.match(/Found free host port\s*:?\s*(\d+)/i);
 						const hostPort = portMatch ? Number(portMatch[1]) : undefined;
@@ -155,7 +147,7 @@ app.post(
 				const containerId = info.containerId;
 				logger.info({ pr: prNumber, containerId }, 'Triggering destroy for PR');
 
-				runLocalScript(['tsx', 'destroy.ts', containerId]).then(result => {
+				worker.destroyForPR(containerId, prNumber).then(result => {
 					if (result.code === 0) {
 						deployments.delete(prNumber);
 						logger.info({ pr: prNumber, containerId }, 'Destroyed deployment for PR');
