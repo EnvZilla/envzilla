@@ -1,4 +1,9 @@
 import express, { Express, Request, Response, NextFunction } from 'express';
+// Load environment variables from .env as early as possible so process.env values
+// (for example TRUST_PROXY) are available when Express initializes and when
+// middleware like express-rate-limit inspects req.ip / X-Forwarded-For.
+import dotenv from 'dotenv';
+dotenv.config();
 import helmet from 'helmet';
 import cors from 'cors';
 import rateLimit from 'express-rate-limit';
@@ -34,16 +39,6 @@ app.use(
 		credentials: true,
 	})
 );
-
-// Detect ngrok browser-skip header for debugging convenience and log it.
-// This does not change behavior, only records when clients (like ngrok) send the header.
-app.use((req: Request, _res: Response, next: NextFunction) => {
-	const skipWarning = req.headers['ngrok-skip-browser-warning'];
-	if (skipWarning) {
-		logger.info({ header: skipWarning }, '🔄 ngrok-skip-browser-warning header detected');
-	}
-	next();
-});
 
 // Body parsing with size limit to mitigate large payload attacks
 app.use(express.json({ limit: '10kb' }));
