@@ -200,7 +200,10 @@ async function handleCreateOrUpdate(
     // DEBUG: log before invoking worker
     logger.info({ pr: prNumber, branch, repoURL }, '▶️ Invoking worker.buildForPR');
 
-    worker.buildForPR(prNumber, branch, repoURL)
+  // Extract repository full name for accurate PR comments (owner/repo)
+  const repoFullName = payload.pull_request?.head?.repo?.full_name || payload.repository?.full_name;
+
+  worker.buildForPR(prNumber, branch, repoURL, repoFullName)
       .then(result => {
         logger.info({ pr: prNumber, result }, '🔔 buildForPR finished'); // <-- daha ayrıntılı log
         if (result.code === 0) {

@@ -54,8 +54,9 @@ const docker = new Docker(dockerOptions);
  */
 export async function buildForPR(
     prNumber: number, 
-    branch?: string, 
-    repoURL?: string
+    branch?: string,
+    repoURL?: string,
+    repoFullNameArg?: string
 ): Promise<BuildForPRResult> {
   const startedAt = Date.now();
   try {
@@ -93,7 +94,9 @@ export async function buildForPR(
 
             // If we have repository info in env, post a comment to the PR with the link
             // Expect REPO_FULL_NAME like owner/repo
-            const repoFullName = process.env.REPO_FULL_NAME || repoURL?.replace(/^https:\/\/(github\.com\/)?/, '').replace(/\.git$/, '');
+            // Prefer explicit repo full name passed from the webhook (owner/repo).
+            // Fallback to environment or derive from clone URL for backward-compat.
+            const repoFullName = repoFullNameArg || process.env.REPO_FULL_NAME || repoURL?.replace(/^https:\/\/(github\.com\/)?/, '').replace(/\.git$/, '');
             // Use per-job ephemeral token if available (in CI/GitHub App flow this will be provided per job)
             const ephemeralToken = process.env.EPHEMERAL_GITHUB_TOKEN || process.env.GITHUB_TOKEN;
             if (repoFullName && ephemeralToken) {
