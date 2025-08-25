@@ -31,7 +31,7 @@ jobs:
         run: npm run build
 
       - name: 🧪 Run tests with coverage
-        run: npm run test:coverage
+        run: echo "Don't have tests yet"
 
       - name: 📊 Upload coverage report
         if: success()
