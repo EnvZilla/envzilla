@@ -202,8 +202,9 @@ async function handleCreateOrUpdate(
 
   // Extract repository full name for accurate PR comments (owner/repo)
   const repoFullName = payload.pull_request?.head?.repo?.full_name || payload.repository?.full_name;
+  const author = payload.pull_request?.user?.login;
 
-  worker.buildForPR(prNumber, branch, repoURL, repoFullName)
+  worker.buildForPR(prNumber, branch, repoURL, repoFullName, author)
       .then(result => {
         logger.info({ pr: prNumber, result }, '🔔 buildForPR finished'); // <-- daha ayrıntılı log
         if (result.code === 0) {

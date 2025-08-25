@@ -56,7 +56,8 @@ export async function buildForPR(
     prNumber: number, 
     branch?: string,
     repoURL?: string,
-    repoFullNameArg?: string
+    repoFullNameArg?: string,
+    author?: string
 ): Promise<BuildForPRResult> {
   const startedAt = Date.now();
   try {
@@ -85,12 +86,37 @@ export async function buildForPR(
         await cleanupTempDir(tempDir);
         
         // Format output to match expected format
-        // Start an ngrok tunnel for the container port so it is reachable externally
+        // Start an external tunnel for the container port so it is reachable from GitHub
         let publicUrl = `http://localhost:${buildResult.hostPort}`;
         try {
             const name = `envzilla-pr-${prNumber}`;
             const tunnel = await startHttpTunnel(buildResult.hostPort, name, undefined, prNumber);
             publicUrl = tunnel.publicUrl;
+
+            // Wait for the preview URL to become responsive before posting a PR comment.
+            // This avoids writing a comment too early while the app or tunnel is still coming up.
+            async function waitForUrl(url: string, attempts = 6, delayMs = 1000, timeoutMs = 3000) {
+                for (let i = 0; i < attempts; i++) {
+                    try {
+                        const controller = new AbortController();
+                        const id = setTimeout(() => controller.abort(), timeoutMs);
+                        const res = await (globalThis as any).fetch(url, { method: 'GET', signal: controller.signal });
+                        clearTimeout(id);
+                        if (res && res.ok) return;
+                    } catch (e) {
+                        // ignore and retry
+                    }
+                    await new Promise((r) => setTimeout(r, delayMs));
+                }
+                throw new Error(`Timed out waiting for preview URL to respond: ${url}`);
+            }
+
+            try {
+                await waitForUrl(publicUrl);
+                logger.info({ pr: prNumber, publicUrl }, 'Preview URL is responsive');
+            } catch (e: any) {
+                logger.warn({ pr: prNumber, publicUrl, err: e?.message }, 'Preview URL did not become responsive in time — will still post comment but note it may be unavailable');
+            }
 
             // If we have repository info in env, post a comment to the PR with the link
             // Expect REPO_FULL_NAME like owner/repo
@@ -113,10 +139,11 @@ export async function buildForPR(
             // Use per-job ephemeral token if available (in CI/GitHub App flow this will be provided per job)
             const ephemeralToken = process.env.EPHEMERAL_GITHUB_TOKEN || process.env.GITHUB_TOKEN;
             if (repoFullName && ephemeralToken) {
-                // Build a bilingual, light-hearted message as requested
+                // Build a bilingual, light-hearted message and mention the PR author when available
                 const safeUrl = (publicUrl || '').toString().trim();
+                const header = author ? `@${author} 👋` : '👀 Envzilla is peeking at your preview environment — Envzilla ortamını dikizliyor 👀';
                 const body = [
-                    `👀 Envzilla is peeking at your preview environment — Envzilla ortamını dikizliyor 👀`,
+                    header,
                     '',
                     `Preview: ${safeUrl}`,
                     `Container: ${buildResult.containerId}`,
