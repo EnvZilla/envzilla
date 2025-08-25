@@ -173,10 +173,18 @@ EnvZilla can be tamed through environment variables:
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `CONTAINER_HEALTH_TIMEOUT_MS` | Max time to wait for container health | `30000` (30s) |
-| `PREVIEW_URL_TIMEOUT_MS` | Total timeout for preview URL checks | `50000` (50s) |
-| `PREVIEW_URL_ATTEMPTS` | Number of attempts to check preview URL | `10` |
-| `PREVIEW_URL_DELAY_MS` | Delay between preview URL attempts | `2000` (2s) |
-| `PREVIEW_URL_REQUEST_TIMEOUT_MS` | Timeout per preview URL request | `5000` (5s) |
+| `SERVICE_READY_ATTEMPTS` | Attempts to check if service is ready before tunnel | `15` |
+| `SERVICE_READY_DELAY_MS` | Delay between service readiness attempts | `2000` (2s) |
+| `SERVICE_READY_REQUEST_TIMEOUT_MS` | Timeout per service readiness request | `5000` (5s) |
+| `PREVIEW_URL_ATTEMPTS` | Number of attempts to verify tunnel connectivity | `5` |
+| `PREVIEW_URL_DELAY_MS` | Delay between tunnel verification attempts | `1000` (1s) |
+| `PREVIEW_URL_REQUEST_TIMEOUT_MS` | Timeout per tunnel verification request | `5000` (5s) |
+
+### Cloudflared Tunnel Configuration
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `CLOUDFLARED_STARTUP_TIMEOUT_MS` | Max time to wait for cloudflared tunnel creation | `30000` (30s) |
+| `CLOUDFLARED_PROTOCOL` | Protocol for cloudflared tunnel (http2 or quic) | `http2` |
 
 ### Job Queue Configuration
 | Variable | Description | Default |
@@ -220,6 +228,8 @@ EnvZilla can be tamed through environment variables:
 | **Redis connection error** | **Ensure Redis server is running on configured host/port** |
 | **Jobs stuck in queue** | **Check if worker process is running and can access Redis** |
 | **Deployments not updating** | **Verify Redis connectivity and check worker logs** |
+| **Tunnel shows errors initially** | **This is normal - tunnel waits for service to be ready before starting** |
+| **Preview URL takes time to load** | **Service readiness checks ensure tunnel starts only when app is ready** |
 
 ### Monitoring
 

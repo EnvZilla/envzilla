@@ -69,7 +69,10 @@ export async function startHttpTunnel(port: number, name?: string, region?: stri
 
   const childEnv = { ...process.env };
 
-  const child = spawn('cloudflared', args, { stdio: ['ignore', 'pipe', 'pipe'], env: childEnv });
+  // Spawn detached so the tunnel process isn't accidentally killed when the
+  // parent process performs cleanup or exits. Keep pipes so we can read the
+  // initial output to learn the quick-tunnel public URL.
+  const child = spawn('cloudflared', args, { stdio: ['ignore', 'pipe', 'pipe'], env: childEnv, detached: true });
   if (prNumber) cloudflaredProcesses.set(prNumber, child);
 
   let resolved = false;
@@ -80,10 +83,12 @@ export async function startHttpTunnel(port: number, name?: string, region?: stri
     const timeout = setTimeout(() => {
       if (resolved) return;
       resolved = true;
-      try { child.kill(); } catch {
-        // Ignore kill errors
-      }
-      if (prNumber) cloudflaredProcesses.delete(prNumber);
+      // Don't forcibly kill the cloudflared process here. In some environments
+      // cloudflared may take longer to produce the quick-tunnel URL or recover
+      // from transient network issues. Leaving the process running helps with
+      // debugging and may still provide a public URL later. The caller can
+      // explicitly stop the tunnel with `stopTunnelForPR` when appropriate.
+      logger.warn({ pr: prNumber, timeoutMs }, 'Timed out waiting for cloudflared to print public URL — leaving process running for debugging');
       reject(new Error('Timed out waiting for cloudflared to print public URL'));
     }, timeoutMs);
 
@@ -136,7 +141,12 @@ export async function startHttpTunnel(port: number, name?: string, region?: stri
     });
 
     child.on('exit', (code, signal) => {
-      if (resolved) return;
+      logger.info({ pr: prNumber, code, signal }, 'cloudflared process exited');
+      if (resolved) {
+        // If the tunnel had been established earlier, ensure we no longer track it.
+        if (prNumber && cloudflaredProcesses.get(prNumber) === child) cloudflaredProcesses.delete(prNumber);
+        return;
+      }
       resolved = true;
       clearTimeout(timeout);
       if (prNumber) cloudflaredProcesses.delete(prNumber);
@@ -146,6 +156,15 @@ export async function startHttpTunnel(port: number, name?: string, region?: stri
 
   const publicUrl = await urlPromise;
   logger.info({ publicUrl, port, prNumber }, '✅ cloudflared tunnel established');
+
+  // Detach the child from the parent's event loop so the parent can exit or
+  // continue without accidentally killing the tunnel. The child was spawned
+  // with `detached: true` above; calling unref() allows the parent to exit
+  // independently while leaving the child running.
+  try { child.unref?.(); } catch {
+    // ignore if unref not supported
+  }
+
   return { publicUrl, proto: publicUrl.startsWith('https') ? 'https' : 'http', port };
 }
 
@@ -153,7 +172,15 @@ export async function stopTunnelForPR(prNumber: number): Promise<void> {
   const child = cloudflaredProcesses.get(prNumber);
   if (!child) return;
   try {
-    child.kill();
+    // If the child was spawned detached, it should have its own process group
+    // on POSIX systems. Kill the process group to ensure any subprocesses are
+    // also terminated. Fall back to child.kill() on platforms that don't
+    // support negative PIDs (Windows).
+    if (child.pid && process.platform !== 'win32') {
+      try { process.kill(-child.pid); } catch (e) { child.kill(); }
+    } else {
+      child.kill();
+    }
     cloudflaredProcesses.delete(prNumber);
     logger.info({ pr: prNumber }, '🛑 cloudflared process killed for PR');
   } catch (err: unknown) {
@@ -163,7 +190,13 @@ export async function stopTunnelForPR(prNumber: number): Promise<void> {
 
 export async function stopAllTunnels(): Promise<void> {
   for (const [pr, child] of cloudflaredProcesses.entries()) {
-    try { child.kill(); } catch {
+    try {
+      if (child.pid && process.platform !== 'win32') {
+        try { process.kill(-child.pid); } catch { child.kill(); }
+      } else {
+        child.kill();
+      }
+    } catch {
       // Ignore kill errors
     }
     cloudflaredProcesses.delete(pr);

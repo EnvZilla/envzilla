@@ -86,24 +86,73 @@ export async function buildForPR(
         // Step 3: Clean up temporary directory
         await cleanupTempDir(tempDir);
         
+        // Step 4: Wait for the service to be ready before starting the tunnel
+        // This prevents the tunnel from being available before the service can handle requests
+        // 🔧 FIX: Previously, cloudflared tunnel was started immediately after container creation,
+        // but before the application inside was ready to serve requests. This caused a brief
+        // period where the tunnel was live but returned errors. Now we:
+        // 1. Wait for the service to be responsive on localhost
+        // 2. Only then start the cloudflared tunnel
+        // 3. Verify tunnel connectivity as a final check
+        const serviceReadyConfig = {
+            attempts: Number(process.env.SERVICE_READY_ATTEMPTS) || 15,
+            delayMs: Number(process.env.SERVICE_READY_DELAY_MS) || 2000,
+            timeoutMs: Number(process.env.SERVICE_READY_REQUEST_TIMEOUT_MS) || 5000
+        };
+        
+        const localUrl = `http://localhost:${buildResult.hostPort}`;
+        
+        async function waitForServiceReady(url: string, attempts = serviceReadyConfig.attempts, delayMs = serviceReadyConfig.delayMs, timeoutMs = serviceReadyConfig.timeoutMs) {
+            logger.info({ pr: prNumber, url, attempts }, '⏳ Waiting for service to be ready before starting tunnel...');
+            
+            for (let i = 0; i < attempts; i++) {
+                try {
+                    const controller = new AbortController();
+                    const id = setTimeout(() => controller.abort(), timeoutMs);
+                    const res = await fetch(url, { method: 'GET', signal: controller.signal });
+                    clearTimeout(id);
+                    if (res && (res.ok || res.status < 500)) { // Accept any non-server-error response
+                        logger.info({ pr: prNumber, url, attempt: i + 1, status: res.status }, '✅ Service is ready, starting tunnel');
+                        return;
+                    }
+                    logger.debug({ pr: prNumber, url, attempt: i + 1, status: res.status }, '⏳ Service not ready yet (server error), retrying...');
+                } catch (error: unknown) {
+                    const errorMsg = error instanceof Error ? error.message : String(error);
+                    logger.debug({ pr: prNumber, url, attempt: i + 1, error: errorMsg }, '⏳ Service not ready yet (connection failed), retrying...');
+                }
+                if (i < attempts - 1) { // Don't delay after the last attempt
+                    await new Promise((r) => setTimeout(r, delayMs));
+                }
+            }
+            throw new Error(`Service not ready after ${attempts} attempts: ${url}`);
+        }
+        
+        // Wait for the service to be ready
+        try {
+            await waitForServiceReady(localUrl);
+        } catch (e: unknown) {
+            logger.warn({ pr: prNumber, localUrl, err: e instanceof Error ? e.message : String(e) }, 'Service readiness check failed — proceeding with tunnel creation anyway');
+        }
+        
         // Format output to match expected format
         // Start an external tunnel for the container port so it is reachable from GitHub
-        let publicUrl = `http://localhost:${buildResult.hostPort}`;
+        let publicUrl = localUrl;
         try {
             const name = `envzilla-pr-${prNumber}`;
             const tunnel = await startHttpTunnel(buildResult.hostPort, name, undefined, prNumber);
             publicUrl = tunnel.publicUrl;
 
-            // Wait for the preview URL to become responsive before posting a PR comment.
-            // This avoids writing a comment too early while the app or tunnel is still coming up.
-            // Configuration can be customized via environment variables.
+            // Additional check: Wait for the public URL to be responsive after tunnel creation
+            // This provides an extra safety net to ensure the tunnel is working properly
             const urlConfig = {
-                attempts: Number(process.env.PREVIEW_URL_ATTEMPTS) || 10,
-                delayMs: Number(process.env.PREVIEW_URL_DELAY_MS) || 2000,
+                attempts: Number(process.env.PREVIEW_URL_ATTEMPTS) || 5, // Reduced attempts since service should already be ready
+                delayMs: Number(process.env.PREVIEW_URL_DELAY_MS) || 1000, // Reduced delay
                 timeoutMs: Number(process.env.PREVIEW_URL_REQUEST_TIMEOUT_MS) || 5000
             };
             
             async function waitForUrl(url: string, attempts = urlConfig.attempts, delayMs = urlConfig.delayMs, timeoutMs = urlConfig.timeoutMs) {
+                logger.info({ pr: prNumber, url, attempts }, '🔍 Verifying tunnel connectivity...');
+                
                 for (let i = 0; i < attempts; i++) {
                     try {
                         const controller = new AbortController();
@@ -111,24 +160,25 @@ export async function buildForPR(
                         const res = await fetch(url, { method: 'GET', signal: controller.signal });
                         clearTimeout(id);
                         if (res && res.ok) {
-                            logger.info({ pr: prNumber, url, attempt: i + 1 }, '✅ Preview URL responded successfully');
+                            logger.info({ pr: prNumber, url, attempt: i + 1 }, '✅ Tunnel is working properly');
                             return;
                         }
+                        logger.debug({ pr: prNumber, url, attempt: i + 1, status: res.status }, '⏳ Tunnel not fully ready, retrying...');
                     } catch (error: unknown) {
-                        logger.debug({ pr: prNumber, url, attempt: i + 1, error: error instanceof Error ? error.message : String(error) }, '⏳ Preview URL not ready yet, retrying...');
+                        logger.debug({ pr: prNumber, url, attempt: i + 1, error: error instanceof Error ? error.message : String(error) }, '⏳ Tunnel connection failed, retrying...');
                     }
                     if (i < attempts - 1) { // Don't delay after the last attempt
                         await new Promise((r) => setTimeout(r, delayMs));
                     }
                 }
-                throw new Error(`Timed out waiting for preview URL to respond after ${attempts} attempts: ${url}`);
+                throw new Error(`Tunnel verification failed after ${attempts} attempts: ${url}`);
             }
 
             try {
                 await waitForUrl(publicUrl);
-                logger.info({ pr: prNumber, publicUrl }, 'Preview URL is responsive');
+                logger.info({ pr: prNumber, publicUrl }, 'Tunnel is working properly');
             } catch (e: unknown) {
-                logger.warn({ pr: prNumber, publicUrl, err: e instanceof Error ? e.message : String(e) }, 'Preview URL did not become responsive in time — will still post comment but note it may be unavailable');
+                logger.warn({ pr: prNumber, publicUrl, err: e instanceof Error ? e.message : String(e) }, 'Tunnel verification failed — will still post comment but tunnel may not be fully ready');
             }
 
             // If we have repository info in env, post a comment to the PR with the link
