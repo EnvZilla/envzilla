@@ -8,7 +8,7 @@ import {
     cleanupTempDir,
     BuildResult 
 } from './lib/buildContainer.js';
-import { startHttpTunnel, stopTunnelForPR } from './lib/ngrokManager.js';
+import { startHttpTunnel, stopTunnelForPR } from './lib/cloudflaredManager.js';
 import { postPRComment } from './lib/githubClient.js';
 import { 
     destroyContainer, 

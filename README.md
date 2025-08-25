@@ -52,22 +52,6 @@ The system is split into two primary components for scalability and raw power:
 
 3.  **Unleash the Beast**:
     * Use `ngrok` to expose your local port 3000 and update your GitHub App's webhook URL.
-
-Exposing a preview and posting PR comment
-----------------------------------------
-
-You can use the provided helper script to open an ngrok HTTP tunnel to a local port and optionally post the public URL as a comment on a GitHub PR.
-
-Example:
-
-    # Install dependencies
-    npm install
-
-    # Start your preview (container) so the app is reachable on localhost:3000
-    # then in another terminal run:
-    node scripts/expose-and-comment.js --port 3000 --owner EnvZilla --repo envzilla --pr 123
-
-To auto-post a comment you must set GITHUB_TOKEN (a repo-scoped token with permission to create issue comments) in the environment. Optionally set NGROK_AUTHTOKEN to use your ngrok account.
     * Run the entire stack with a single command:
         ```bash
         docker-compose up --build -d
@@ -89,3 +73,24 @@ To auto-post a comment you must set GITHUB_TOKEN (a repo-scoped token with permi
 * **Code of Conduct**: All participants are expected to follow our **[Code of Conduct](./CODE_OF_CONDUCT.md)**.
 * **Security**: For a breakdown of risks and responsible disclosure, see our **[Security Guide](./SECURITY.md)**.
 * **License & Terms**: This project is licensed under the MIT License. By using it, you agree to the **[Terms of Use](./TERMS.md)**.
+
+## ⚠️ Troubleshooting cloudflared (quick tunnels)
+
+If you see logs mentioning QUIC or UDP buffer sizes (for example: "failed to sufficiently increase receive buffer size"), cloudflared's default QUIC protocol may be failing to establish on your host. You can resolve this by either increasing your host UDP buffer limits or switching cloudflared to use HTTP/2 instead:
+
+- To temporarily switch protocol, set an environment variable before running EnvZilla:
+
+```bash
+export CLOUDFLARED_PROTOCOL=http2
+export CLOUDFLARED_STARTUP_TIMEOUT_MS=30000
+```
+
+- To increase UDP buffer limits on Linux/WSL2, run as root:
+
+```bash
+sudo sysctl -w net.core.rmem_max=8388608
+sudo sysctl -w net.core.rmem_default=8388608
+sudo sysctl --system
+```
+
+Switching to HTTP/2 avoids QUIC/UDP buffer issues and is the default behavior for new EnvZilla runs.
