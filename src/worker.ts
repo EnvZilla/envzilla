@@ -10,6 +10,7 @@ import {
 } from './lib/buildContainer.js';
 import { startHttpTunnel, stopTunnelForPR } from './lib/cloudflaredManager.js';
 import { postPRComment } from './lib/githubClient.js';
+import { getInstallationAccessToken } from './lib/githubAuth.js';
 import { 
     destroyContainer, 
     destroyByPRNumber,
@@ -57,7 +58,8 @@ export async function buildForPR(
     branch?: string,
     repoURL?: string,
     repoFullNameArg?: string,
-    author?: string
+    author?: string,
+    installationId?: number | string
 ): Promise<BuildForPRResult> {
   const startedAt = Date.now();
   try {
@@ -137,7 +139,16 @@ export async function buildForPR(
 
             const repoFullName = deriveRepoFullName(repoFullNameArg, repoURL);
             // Use per-job ephemeral token if available (in CI/GitHub App flow this will be provided per job)
-            const ephemeralToken = process.env.EPHEMERAL_GITHUB_TOKEN || process.env.GITHUB_TOKEN;
+            // Prefer a true installation token when installationId is provided
+            let ephemeralToken = process.env.EPHEMERAL_GITHUB_TOKEN || process.env.GITHUB_TOKEN;
+            if (!ephemeralToken && installationId) {
+                try {
+                    ephemeralToken = await getInstallationAccessToken(installationId);
+                } catch (e: any) {
+                    logger.warn({ pr: prNumber, installationId, err: e?.message }, 'Failed to create installation access token');
+                }
+            }
+
             if (repoFullName && ephemeralToken) {
                 // Build a bilingual, light-hearted message and mention the PR author when available
                 const safeUrl = (publicUrl || '').toString().trim();

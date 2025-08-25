@@ -42,8 +42,12 @@ export interface GitHubWebhookPayload {
   };
   sender?: {
     login: string;
+    id: number;
     avatar_url: string;
     type: string;
+  };
+  installation?: {
+    id: number;
   };
 }
 
