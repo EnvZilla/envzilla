@@ -151,13 +151,16 @@ export async function buildForPR(
             if (repoFullName && ephemeralToken) {
                 // Build a bilingual, light-hearted message and mention the PR author when available
                 const safeUrl = (publicUrl || '').toString().trim();
-                const header = author ? `@${author} 👋` : '👀 Envzilla is peeking at your preview environment — Envzilla ortamını dikizliyor 👀';
+                const header = author ? `@${author} 👋` : '👀 Envzilla is peeking at your preview environment 👀';
                 const body = [
                     header,
+                    '🔥 The Beast Lives! 🔥',
                     '',
                     `Preview: ${safeUrl}`,
                     `Container: ${buildResult.containerId}`,
-                    `Port: ${buildResult.hostPort}`
+                    `Port: ${buildResult.hostPort}`,
+                    '',
+                    '💥 PR opened → Env spawned. PR closed → Beast vanishes.'
                 ].join('\n');
                 // best-effort post; do not fail the build if comment fails
                 try { await postPRComment(ephemeralToken, repoFullName, prNumber, body); } catch (err: unknown) { logger.warn({ err, pr: prNumber }, 'Failed to post PR comment'); }

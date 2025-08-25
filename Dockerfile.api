@@ -1,12 +1,15 @@
 FROM node:20-alpine
 
-# Install Docker CLI, Git, and cloudflared
-RUN apk add --no-cache docker-cli git curl && \
+# Install Docker CLI, Git, and wget
+RUN apk add --no-cache docker-cli git wget && \
     # Install cloudflared
-    curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o /usr/local/bin/cloudflared && \
+    wget https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -O /usr/local/bin/cloudflared && \
     chmod +x /usr/local/bin/cloudflared
 
 WORKDIR /app
+
+# Copy the cert.pem file to the container
+COPY keys/cert.pem /app/keys/cert.pem
 
 COPY package*.json ./
 RUN npm ci
