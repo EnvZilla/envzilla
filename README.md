@@ -43,10 +43,31 @@ When the PR is closed, the beast returns to put the environment back to sleep. �
 
 ## 🏛️ Architecture
 
-EnvZilla consists of two primary components working together to create and manage preview environments:
+EnvZilla uses a modern, scalable architecture with Redis-based job queues for high-performance preview environment management:
 
-1. **API Layer (`server.js`)**: Handles webhook events, signature verification, and API endpoints
-2. **Worker Layer**: Performs container management, git operations, and deployment tasks
+### Core Components
+
+1. **API Server (`src/server.ts`)**: Handles webhook events, signature verification, and API endpoints
+2. **Job Queue System (`src/lib/jobQueue.ts`)**: Redis + BullMQ for scalable job processing
+3. **Worker Process (`src/jobWorker.ts`)**: Processes build/destroy jobs from the queue
+4. **Deployment Manager (`src/lib/deploymentManager.ts`)**: Redis-based deployment state tracking
+
+### Job Queue Architecture
+
+```
+GitHub Webhook → Server → Job Queue (Redis + BullMQ) → Worker Process(es)
+                    ↓
+               Deployment Tracking (Redis)
+```
+
+**Key Benefits:**
+- **Horizontal Scalability**: Run multiple worker processes
+- **Job Persistence**: Jobs survive server restarts  
+- **Non-blocking**: Webhook responses return immediately
+- **Automatic Retry**: Failed jobs retry with exponential backoff
+- **Real-time Monitoring**: Queue statistics and job status tracking
+
+For detailed information about the job queue system, see [Job Queue Documentation](./docs/JOB_QUEUE.md).
 
 <p align="center">
   <img src="/public/architecture-diagram.png" alt="EnvZilla Architecture Diagram" width="600" />
@@ -59,6 +80,7 @@ This architecture provides scalability and security by separating the concerns o
 Before you can tame this beast, make sure you have:
 
 * **Docker** installed on your machine
+* **Redis** server for job queue and deployment tracking
 * **Node.js 20+** for local development
 * A **GitHub repository** with webhook permissions configured
 
@@ -75,21 +97,41 @@ Before you can tame this beast, make sure you have:
    npm install
    ```
 
-3. **Set up your environment**:
+3. **Start Redis** (using Docker):
+   ```bash
+   docker run -d --name redis -p 6379:6379 redis:7-alpine
+   ```
+
+4. **Set up your environment**:
    * Copy the example env file: `cp .env.example .env`
-   * Edit `.env` with at minimum your GitHub webhook secret:
-     ```
+   * Edit `.env` with your configuration:
+     ```bash
      GITHUB_WEBHOOK_SECRET=your_webhook_secret
+     REDIS_HOST=localhost
+     REDIS_PORT=6379
      ```
 
-4. **Start the server** (choose one method):
-   ```bash
-   # Method 1: Build and start
-   npm run build
-   npm start
+5. **Start the application** (choose one method):
    
-   # Method 2: Direct execution with tsx
-   npx tsx src/server.ts
+   **Method 1: Using Docker Compose (Recommended)**
+   ```bash
+   docker-compose up -d
+   ```
+   
+   **Method 2: Manual Development**
+   ```bash
+   # Terminal 1: Start server
+   npm run dev:server
+   
+   # Terminal 2: Start worker
+   npm run dev:worker
+   ```
+   
+   **Method 3: Production Build**
+   ```bash
+   npm run build
+   npm run start:server  # Terminal 1
+   npm run start:worker  # Terminal 2
    ```
 
 5. **Configure your GitHub repository webhook**:
@@ -109,6 +151,7 @@ Before you can tame this beast, make sure you have:
 
 EnvZilla can be tamed through environment variables:
 
+### Server Configuration
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `PORT` | Port for the API server | `3000` |
@@ -117,6 +160,19 @@ EnvZilla can be tamed through environment variables:
 | `RATE_LIMIT_MAX` | Maximum API requests per window | `100` |
 | `CORS_ORIGIN` | Allowed CORS origins | `http://localhost:3000` |
 | `TRUST_PROXY` | Whether to trust proxy headers | `true` |
+
+### Redis Configuration  
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `REDIS_HOST` | Redis server hostname | `localhost` |
+| `REDIS_PORT` | Redis server port | `6379` |
+| `REDIS_PASSWORD` | Redis authentication password | *(none)* |
+| `REDIS_DB` | Redis database number | `0` |
+
+### Job Queue Configuration
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `JOB_CONCURRENCY` | Concurrent jobs per worker | `3` |
 
 ## 🕹️ Usage
 
@@ -129,9 +185,17 @@ EnvZilla can be tamed through environment variables:
 
 ### API Endpoints
 
-- **`GET /health`**: Check system health
+#### Deployment Management
+- **`GET /health`**: Check system health (includes Redis connectivity)
 - **`GET /deployments/:prNumber`**: Get status of a specific deployment
-- **`GET /deployments`**: List all active deployments
+- **`GET /deployments`**: List all active deployments  
+- **`POST /admin/cleanup`**: Manually trigger cleanup of stale deployments
+
+#### Job Queue Monitoring  
+- **`GET /admin/queue/stats`**: Get queue statistics and deployment counts
+- **`GET /admin/jobs/:jobId`**: Get status of a specific job
+
+#### Webhook Endpoint
 - **`POST /webhooks/github`**: Webhook endpoint for GitHub events
 
 ## ⚠️ Troubleshooting
@@ -144,6 +208,20 @@ EnvZilla can be tamed through environment variables:
 | Container build fails | Ensure Docker is running and has enough resources |
 | Server won't start | Check that all required environment variables are set |
 | Signature verification fails | Verify that webhook secret matches in both GitHub and .env |
+| **Redis connection error** | **Ensure Redis server is running on configured host/port** |
+| **Jobs stuck in queue** | **Check if worker process is running and can access Redis** |
+| **Deployments not updating** | **Verify Redis connectivity and check worker logs** |
+
+### Monitoring
+
+Check system status and job queue health:
+```bash
+# System health (includes Redis connectivity)
+curl http://localhost:3000/health
+
+# Queue statistics  
+curl http://localhost:3000/admin/queue/stats
+```
 
 ## 🌟 Contributing
 

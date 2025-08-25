@@ -55,7 +55,7 @@ export interface DeploymentInfo {
   containerId?: string;
   hostPort?: number;
   createdAt: number;
-  status: 'building' | 'running' | 'destroying' | 'failed' | 'stopped';
+  status: 'queued' | 'building' | 'running' | 'destroying' | 'failed' | 'stopped';
   branch?: string;
   commitSha?: string;
   title?: string;

@@ -10,6 +10,8 @@ import rateLimit from 'express-rate-limit';
 import logger from './utils/logger.js';
 import { verifySignature } from './middlewares/verifySignature.js';
 import { dispatchWebhookEvent, getDeploymentInfo, getAllDeployments, cleanupStaleDeployments } from './middlewares/dispatcherServer.js';
+import { getQueueStats, getJobStatus } from './lib/jobQueue.js';
+import { DeploymentManager } from './lib/deploymentManager.js';
 import { performHealthCheck, logHealthStatus } from './utils/healthCheck.js';
 
 const app: Express = express();
@@ -87,59 +89,108 @@ app.get('/health', async (req: Request, res: Response) => {
 });
 
 // Get deployment information for a specific PR
-app.get('/deployments/:prNumber', (req: Request, res: Response) => {
+app.get('/deployments/:prNumber', async (req: Request, res: Response) => {
 	const prNumber = Number(req.params.prNumber);
 	if (isNaN(prNumber)) {
 		return res.status(400).json({ error: 'Invalid PR number' });
 	}
 
-	const deployment = getDeploymentInfo(prNumber);
-	if (!deployment) {
-		return res.status(404).json({ error: 'Deployment not found' });
-	}
+	try {
+		const deployment = await getDeploymentInfo(prNumber);
+		if (!deployment) {
+			return res.status(404).json({ error: 'Deployment not found' });
+		}
 
-	res.json({
-		pr: prNumber,
-		status: deployment.status,
-		containerId: deployment.containerId,
-		hostPort: deployment.hostPort,
-		createdAt: new Date(deployment.createdAt).toISOString(),
-		branch: deployment.branch,
-		commitSha: deployment.commitSha
-	});
+		res.json({
+			pr: prNumber,
+			status: deployment.status,
+			containerId: deployment.containerId,
+			hostPort: deployment.hostPort,
+			createdAt: new Date(deployment.createdAt).toISOString(),
+			branch: deployment.branch,
+			commitSha: deployment.commitSha
+		});
+	} catch (error: unknown) {
+		logger.error({ pr: prNumber, error: error instanceof Error ? error.message : String(error) }, 'Failed to get deployment info');
+		res.status(500).json({ error: 'Internal server error' });
+	}
 });
 
 // Get all active deployments
-app.get('/deployments', (req: Request, res: Response) => {
-	const deployments = getAllDeployments();
-	const deploymentList = Array.from(deployments.entries()).map(([prNumber, deployment]) => ({
-		pr: prNumber,
-		status: deployment.status,
-		containerId: deployment.containerId,
-		hostPort: deployment.hostPort,
-		createdAt: new Date(deployment.createdAt).toISOString(),
-		branch: deployment.branch,
-		commitSha: deployment.commitSha
-	}));
+app.get('/deployments', async (req: Request, res: Response) => {
+	try {
+		const deployments = await getAllDeployments();
+		const deploymentList = Array.from(deployments.entries()).map(([prNumber, deployment]) => ({
+			pr: prNumber,
+			status: deployment.status,
+			containerId: deployment.containerId,
+			hostPort: deployment.hostPort,
+			createdAt: new Date(deployment.createdAt).toISOString(),
+			branch: deployment.branch,
+			commitSha: deployment.commitSha
+		}));
 
-	res.json({
-		count: deploymentList.length,
-		deployments: deploymentList
-	});
+		res.json({
+			count: deploymentList.length,
+			deployments: deploymentList
+		});
+	} catch (error: unknown) {
+		logger.error({ error: error instanceof Error ? error.message : String(error) }, 'Failed to get all deployments');
+		res.status(500).json({ error: 'Internal server error' });
+	}
 });
 
 // Manual cleanup endpoint for stale deployments
-app.post('/admin/cleanup', (req: Request, res: Response) => {
+app.post('/admin/cleanup', async (req: Request, res: Response) => {
 	const maxAgeHours = Number(req.query.maxAge) || 24;
 	const maxAgeMs = maxAgeHours * 60 * 60 * 1000;
 	
-	const cleanedCount = cleanupStaleDeployments(maxAgeMs);
+	try {
+		const cleanedCount = await cleanupStaleDeployments(maxAgeMs);
+		
+		res.json({
+			message: `Cleanup completed`,
+			cleanedDeployments: cleanedCount,
+			maxAgeHours
+		});
+	} catch (error: unknown) {
+		logger.error({ error: error instanceof Error ? error.message : String(error) }, 'Failed to cleanup stale deployments');
+		res.status(500).json({ error: 'Internal server error' });
+	}
+});
+
+// Job queue monitoring endpoints
+app.get('/admin/queue/stats', async (req: Request, res: Response) => {
+	try {
+		const queueStats = await getQueueStats();
+		const deploymentStats = await DeploymentManager.getDeploymentStats();
+		
+		res.json({
+			queue: queueStats,
+			deployments: deploymentStats,
+			timestamp: Date.now()
+		});
+	} catch (error: unknown) {
+		logger.error({ error: error instanceof Error ? error.message : String(error) }, 'Failed to get queue stats');
+		res.status(500).json({ error: 'Internal server error' });
+	}
+});
+
+// Get specific job status
+app.get('/admin/jobs/:jobId', async (req: Request, res: Response) => {
+	const jobId = req.params.jobId;
 	
-	res.json({
-		message: `Cleanup completed`,
-		cleanedDeployments: cleanedCount,
-		maxAgeHours
-	});
+	try {
+		const jobStatus = await getJobStatus(jobId);
+		if (!jobStatus) {
+			return res.status(404).json({ error: 'Job not found' });
+		}
+		
+		res.json(jobStatus);
+	} catch (error: unknown) {
+		logger.error({ jobId, error: error instanceof Error ? error.message : String(error) }, 'Failed to get job status');
+		res.status(500).json({ error: 'Internal server error' });
+	}
 });
 
 // Main GitHub webhook endpoint - now uses the comprehensive event dispatcher
@@ -176,10 +227,10 @@ app.listen(PORT, () => {
 	logger.info({ port: PORT }, `EnvZilla sample app roaring on port http://localhost:${PORT} — press CTRL+C to calm the beast`);
 	
 	// Start background cleanup job - runs every 6 hours
-	const cleanupInterval = setInterval(() => {
+	const cleanupInterval = setInterval(async () => {
 		logger.info('🧹 Running scheduled cleanup of stale deployments');
 		try {
-			const cleanedCount = cleanupStaleDeployments();
+			const cleanedCount = await cleanupStaleDeployments();
 			if (cleanedCount > 0) {
 				logger.info({ cleanedCount }, 'Scheduled cleanup completed');
 			}

@@ -18,7 +18,11 @@
     "clean": "rimraf dist",
     "build": "npm run clean && tsc -p tsconfig.json",
     "start": "node dist/src/index.js",
+    "start:server": "node dist/src/index.js",
+    "start:worker": "node dist/src/jobWorker.js",
     "dev": "tsx watch src/index.ts",
+    "dev:server": "tsx watch src/index.ts",
+    "dev:worker": "tsx watch src/jobWorker.ts",
     "test": "echo \"Error: no test specified\" && exit 1",
     "lint": "eslint . --ext .ts",
     "format": "prettier --write .",
@@ -47,6 +51,7 @@
     "@octokit/core": "^7.0.3",
     "@octokit/rest": "^22.0.0",
     "@types/dockerode": "^3.3.43",
+    "bullmq": "^5.58.1",
     "cors": "^2.8.5",
     "dockerode": "^4.0.7",
     "dotenv": "^16.1.4",
@@ -54,9 +59,11 @@
     "express-rate-limit": "^7.0.0",
     "get-port": "^7.1.0",
     "helmet": "^6.0.1",
+    "ioredis": "^5.7.0",
     "ngrok": "^5.0.0-beta.2",
     "octokit": "^5.0.3",
     "pino": "^8.21.0",
-    "pino-pretty": "^8.1.0"
+    "pino-pretty": "^8.1.0",
+    "redis": "^5.8.2"
   }
 }
