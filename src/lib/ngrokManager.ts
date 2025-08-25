@@ -66,10 +66,14 @@ export async function startHttpTunnel(port: number, name?: string, region?: stri
   logger.info({ port, name, region, prNumber }, '🔌 Starting ngrok tunnel (CLI)');
 
   const args = ['http', String(port)];
-  // If an auth token is set, rely on user's ngrok config; otherwise CLI will run unauthenticated
-  // Additional CLI flags can be appended if needed
 
-  const child = spawn('ngrok', args, { stdio: ['ignore', 'pipe', 'pipe'] });
+  // Create a cleaned environment for the ngrok child process so we can "valet" it
+  const childEnv = { ...process.env };
+  // remove user's authtoken so ngrok runs without using that credential
+  // (acts like a guest/valet)
+  delete (childEnv as any).NGROK_AUTHTOKEN;
+
+  const child = spawn('ngrok', args, { stdio: ['ignore', 'pipe', 'pipe'], env: childEnv });
 
   if (prNumber) ngrokProcesses.set(prNumber, child);
 
@@ -77,13 +81,27 @@ export async function startHttpTunnel(port: number, name?: string, region?: stri
     const s = b.toString();
     logger.info({ pr: prNumber, chunk: s.trim() }, 'ngrok stdout');
   });
+
+  // Promise that will be rejected if ngrok emits the auth error on stderr
+  let rejectAuth: (err: any) => void = () => {};
+  const authErrorPromise = new Promise<never>((_, rej) => { rejectAuth = rej; });
+
   child.stderr?.on('data', (b) => {
     const s = b.toString();
     logger.warn({ pr: prNumber, chunk: s.trim() }, 'ngrok stderr');
+
+    // If ngrok reports the auth-required error, kill the process and surface an error
+    if (s.includes('ERR_NGROK_108')) {
+      logger.warn({ pr: prNumber }, 'ngrok CLI reported ERR_NGROK_108 (auth required) - killing process');
+      try { child.kill(); } catch {}
+      if (prNumber) ngrokProcesses.delete(prNumber);
+      rejectAuth(new Error('ngrok CLI requires an auth token (ERR_NGROK_108)'));
+    }
   });
 
   try {
-    const publicUrl = await pollNgrokApiForPort(port, 12_000);
+    // Race between obtaining the public URL and an immediate auth error from stderr
+    const publicUrl = await Promise.race([pollNgrokApiForPort(port, 12_000), authErrorPromise]);
     logger.info({ publicUrl, port, prNumber }, '✅ ngrok tunnel established (CLI)');
     return { publicUrl, proto: 'http', port };
   } catch (err: any) {
