@@ -8,7 +8,7 @@ import {
     cleanupTempDir,
     BuildResult 
 } from './lib/buildContainer.js';
-import { startHttpTunnel, stopTunnel } from './lib/ngrokManager.js';
+import { startHttpTunnel, stopTunnelForPR } from './lib/ngrokManager.js';
 import { postPRComment } from './lib/githubClient.js';
 import { 
     destroyContainer, 
@@ -88,7 +88,7 @@ export async function buildForPR(
         let publicUrl = `http://localhost:${buildResult.hostPort}`;
         try {
             const name = `envzilla-pr-${prNumber}`;
-            const tunnel = await startHttpTunnel(buildResult.hostPort, name);
+            const tunnel = await startHttpTunnel(buildResult.hostPort, name, undefined, prNumber);
             publicUrl = tunnel.publicUrl;
 
             // If we have repository info in env, post a comment to the PR with the link
@@ -189,6 +189,8 @@ export async function destroyForPR(containerId: string, prNumber?: number): Prom
                 containerDestroyed: destroyResult.containerDestroyed,
                 imageDestroyed: destroyResult.imageDestroyed
             }, '✅ Integrated destroy completed successfully');
+            // Attempt to stop any ngrok tunnel tied to this PR
+            try { if (prNumber) await stopTunnelForPR(prNumber); } catch (err: any) { logger.warn({ err, pr: prNumber }, 'Failed to stop ngrok tunnel for PR'); }
         }
         
         return {
