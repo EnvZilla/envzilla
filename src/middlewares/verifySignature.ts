@@ -23,7 +23,7 @@ export function verifySignature(req: Request, res: Response, next: NextFunction)
   // Prefer raw body if the server saved it (see note in README). Fall back to
   // JSON stringification only as a last resort.
   // Some body parsers can attach the raw buffer to req.rawBody or req['rawBody'].
-  const anyReq = req as any;
+  const anyReq = req as Request & { rawBody?: Buffer; raw?: Buffer };
   let payloadBuffer: Buffer;
 
   if (anyReq.rawBody && Buffer.isBuffer(anyReq.rawBody)) {
@@ -49,7 +49,7 @@ export function verifySignature(req: Request, res: Response, next: NextFunction)
       logger.error({ topic: 'webhook' }, 'Invalid GitHub signature');
       return res.status(401).send('Invalid signature');
     }
-  } catch (err: any) {
+  } catch (err: unknown) {
     logger.error({ topic: 'webhook', err }, 'Error while verifying signature');
     return res.status(401).send('Invalid signature');
   }

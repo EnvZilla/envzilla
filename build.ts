@@ -3,7 +3,7 @@
 
 import { spawn } from 'child_process';
 import * as net from 'net';
-import logger from './src/utils/logger.ts';
+import logger from './src/utils/logger.js';
 
 /**
  * Configuration for the Docker build and run process.
@@ -60,7 +60,7 @@ async function main() {
         const containerId = await runContainer(hostPort);
     logger.info({ containerId, hostPort, containerPort: DOCKER_CONFIG.containerPort }, 'Container started');
 
-    } catch (error: any) {
+    } catch (error: unknown) {
     logger.error({ err: error }, 'Operation failed');
         process.exitCode = 1;
     }
@@ -129,7 +129,7 @@ function runCommand(cmd: string, args: string[], opts?: { timeoutMs?: number; st
 }
 
 async function buildImage() {
-    console.log(`Building Docker image '${DOCKER_CONFIG.imageTag}'...`);
+    logger.info(`Building Docker image '${DOCKER_CONFIG.imageTag}'...`);
     // Use argument array to avoid shell interpolation and injection.
     const args = ['build', '-f', DOCKER_CONFIG.dockerfilePath, '-t', DOCKER_CONFIG.imageTag, DOCKER_CONFIG.contextPath];
 
@@ -137,7 +137,7 @@ async function buildImage() {
     if (exitCode !== 0) {
         throw new Error('docker build failed (non-zero exit code)');
     }
-    console.log('✅ Image built successfully.');
+    logger.info('✅ Image built successfully.');
 }
 
 /**
@@ -146,7 +146,7 @@ async function buildImage() {
  * @returns The ID of the started container.
  */
 async function runContainer(hostPort: number): Promise<string> {
-    console.log('Starting container...');
+    logger.info('Starting container...');
 
     // Validate port is a number in the allowed range.
     if (!Number.isInteger(hostPort) || hostPort < PORT_CONFIG.min || hostPort > PORT_CONFIG.max) {
@@ -179,7 +179,7 @@ async function ensureDockerIsAvailable() {
         if (exitCode !== 0) {
             throw new Error('docker --version returned non-zero exit code');
         }
-    } catch (err) {
+    } catch {
         const errorMessage =
 `Docker CLI not found or not responding.
 Please ensure Docker Desktop is running and that the 'docker' command is accessible in your shell's PATH.
@@ -242,12 +242,14 @@ function isPortFreeWithTimeout(port: number, timeoutMs: number): Promise<boolean
         const timer = setTimeout(() => {
             if (!settled) {
                 settled = true;
-                try { server.close(); } catch {}
+                try { server.close(); } catch {
+                    // Ignore close errors
+                }
                 resolve(false);
             }
         }, timeoutMs);
 
-        server.once('error', (err: any) => {
+        server.once('error', () => {
             if (settled) return;
             settled = true;
             clearTimeout(timer);
@@ -264,7 +266,7 @@ function isPortFreeWithTimeout(port: number, timeoutMs: number): Promise<boolean
 
         try {
             server.listen(port, '0.0.0.0');
-        } catch (err) {
+        } catch {
             if (!settled) {
                 settled = true;
                 clearTimeout(timer);

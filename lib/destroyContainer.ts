@@ -14,7 +14,9 @@ function runCommand(cmd: string, args: string[], timeoutMs = 30_000): Promise<{ 
         const timer = setTimeout(() => {
             if (!finished) {
                 finished = true;
-                try { child.kill('SIGKILL'); } catch {}
+                try { child.kill('SIGKILL'); } catch {
+                    // Ignore kill errors
+                }
                 reject(new Error(`${cmd} ${args.join(' ')} timed out after ${timeoutMs}ms`));
             }
         }, timeoutMs);
@@ -125,8 +127,8 @@ export async function destroyContainer(
 
         result.success = result.containerDestroyed;
 
-    } catch (error: any) {
-        const errorMsg = `Error during container destroy: ${error.message}`;
+    } catch (error: unknown) {
+        const errorMsg = `Error during container destroy: ${error instanceof Error ? error.message : String(error)}`;
         result.errors.push(errorMsg);
         logger.error({ containerId: containerId.substring(0, 12), prNumber, error }, errorMsg);
     }
@@ -192,8 +194,8 @@ async function destroyAssociatedImages(containerId: string, prNumber: number | u
             }
         }
 
-    } catch (error: any) {
-        const errorMsg = `Error destroying associated images: ${error.message}`;
+    } catch (error: unknown) {
+        const errorMsg = `Error destroying associated images: ${error instanceof Error ? error.message : String(error)}`;
         result.errors.push(errorMsg);
         logger.warn({ containerId: containerId.substring(0, 12), error }, errorMsg);
     }
@@ -219,7 +221,7 @@ async function cleanupByContainerName(containerName: string, result: DestroyResu
                 }
             }
         }
-    } catch (error: any) {
+    } catch (error: unknown) {
         logger.warn({ containerName, error }, 'Failed to cleanup by container name');
     }
 }
@@ -253,14 +255,14 @@ export async function destroyByPRNumber(prNumber: number): Promise<DestroyResult
             logger.info({ prNumber }, '📭 No containers found for PR');
         }
         
-    } catch (error: any) {
+    } catch (error: unknown) {
         logger.error({ prNumber, error }, '❌ Error finding containers by PR number');
         results.push({
             success: false,
             containerId: '',
             containerDestroyed: false,
             imageDestroyed: false,
-            errors: [`Error finding containers: ${error.message}`]
+            errors: [`Error finding containers: ${error instanceof Error ? error.message : String(error)}`]
         });
     }
     

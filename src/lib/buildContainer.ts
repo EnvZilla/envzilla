@@ -275,7 +275,9 @@ function isPortFreeWithTimeout(port: number, timeoutMs: number): Promise<boolean
         const timer = setTimeout(() => {
             if (!settled) {
                 settled = true;
-                try { server.close(); } catch {}
+                try { server.close(); } catch {
+                    // Ignore close errors
+                }
                 resolve(false);
             }
         }, timeoutMs);
@@ -317,7 +319,7 @@ export async function ensureDockerIsAvailable(): Promise<void> {
         if (exitCode !== 0) {
             throw new Error('docker --version returned non-zero exit code');
         }
-    } catch (err) {
+    } catch {
         const errorMessage = `Docker CLI not found or not responding.
 Please ensure Docker Desktop is running and that the 'docker' command is accessible in your shell's PATH.
 For WSL2 users, make sure WSL integration is enabled in Docker Desktop settings.

@@ -1,6 +1,6 @@
 // utils/logger.ts
 
-import pino from 'pino';
+import { pino } from 'pino';
 
 const level = (process.env.LOG_LEVEL || 'info') as pino.Level;
 const pretty = process.env.NODE_ENV !== 'production';
@@ -16,8 +16,7 @@ const baseOptions: pino.LoggerOptions = {
   redact,
 };
 
-const pinoFactory: any = pino;
-const logger = pinoFactory(
+const logger = pino(
   pretty
     ? {
         ...baseOptions,

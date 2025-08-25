@@ -5,9 +5,7 @@ import * as worker from '../worker.js';
 import { 
   GitHubWebhookPayload, 
   DeploymentInfo, 
-  EncryptedData, 
-  WebhookProcessingResult,
-  WebhookEventContext 
+  EncryptedData
 } from '../types/webhook.js';
 
 // In-memory deployment tracking
@@ -59,7 +57,7 @@ function decryptData(encryptedData: string, key: string, iv: string, tag: string
  * Processes webhook payload and extracts sensitive information
  */
 function processWebhookPayload(payload: GitHubWebhookPayload): {
-  processedData: any;
+  processedData: GitHubWebhookPayload;
   sensitiveData: string[];
 } {
   const sensitiveData: string[] = [];
@@ -80,7 +78,7 @@ function processWebhookPayload(payload: GitHubWebhookPayload): {
 /**
  * Main webhook event dispatcher middleware
  */
-export async function dispatchWebhookEvent(req: Request, res: Response, next: NextFunction) {
+export async function dispatchWebhookEvent(req: Request, res: Response, _next: NextFunction) {
   try {
     const event = req.headers['x-github-event'] as string | undefined;
     const payload = req.body as GitHubWebhookPayload;
@@ -102,7 +100,7 @@ export async function dispatchWebhookEvent(req: Request, res: Response, next: Ne
     const { action } = payload;
 
     // Process and encrypt sensitive data
-    const { processedData, sensitiveData } = processWebhookPayload(payload);
+    const { sensitiveData } = processWebhookPayload(payload);
     const encryptionKey = process.env.GITHUB_WEBHOOK_SECRET || 'fallback-key';
     
     // Encrypt sensitive data for secure processing
@@ -142,18 +140,20 @@ export async function dispatchWebhookEvent(req: Request, res: Response, next: Ne
       message: 'Webhook event processed successfully' 
     });
 
-  } catch (error: any) {
+  } catch (error: unknown) {
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+    const errorStack = error instanceof Error ? error.stack : undefined;
     logger.error({
-      error: error.message,
-      stack: error.stack,
+      error: errorMessage,
+      stack: errorStack,
       payload: req.body,
       headers: req.headers
     }, '❌ Error in webhook dispatcher');
     res.status(500).json({ 
       error: 'Internal server error', 
       message: 'Failed to process webhook event',
-      details: error.message,
-      stack: error.stack
+      details: errorMessage,
+      stack: errorStack
     });
   }
 }
@@ -257,12 +257,13 @@ async function handleCreateOrUpdate(
         logger.error({ pr: prNumber, error: error.stack || error.message }, '❌ Build process failed');
       });
 
-  } catch (error: any) {
-    logger.error({ pr: prNumber, error: error.message }, '❌ Error in create/update handler');
+  } catch (error: unknown) {
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+    logger.error({ pr: prNumber, error: errorMessage }, '❌ Error in create/update handler');
     deployments.set(prNumber, {
       ...deployments.get(prNumber),
       status: 'failed',
-      lastError: error.message
+      lastError: errorMessage
     } as DeploymentInfo);
   }
 }
@@ -270,7 +271,7 @@ async function handleCreateOrUpdate(
 /**
  * Handles PR closure or merging
  */
-async function handleDestroy(prNumber: number, payload: GitHubWebhookPayload) {
+async function handleDestroy(prNumber: number, _payload: GitHubWebhookPayload) {
   try {
     const deployment = deployments.get(prNumber);
     
@@ -311,8 +312,9 @@ async function handleDestroy(prNumber: number, payload: GitHubWebhookPayload) {
         }, '❌ Destroy process failed');
       });
 
-  } catch (error: any) {
-    logger.error({ pr: prNumber, error: error.message }, '❌ Error in destroy handler');
+  } catch (error: unknown) {
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+    logger.error({ pr: prNumber, error: errorMessage }, '❌ Error in destroy handler');
   }
 }
 

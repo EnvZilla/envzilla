@@ -1,5 +1,5 @@
 import { spawn } from 'child_process';
-import logger from './src/utils/logger.ts';
+import logger from './src/utils/logger.js';
 
 /**
  * Simple helper to run a command and collect stdout/stderr without using a shell.
@@ -10,7 +10,9 @@ function runCommand(cmd: string, args: string[], timeoutMs = 30_000): Promise<{ 
         let stdout = '';
         let stderr = '';
         const timer = setTimeout(() => {
-            try { child.kill('SIGKILL'); } catch {}
+            try { child.kill('SIGKILL'); } catch {
+                // Ignore kill errors
+            }
             reject(new Error(`${cmd} ${args.join(' ')} timed out after ${timeoutMs}ms`));
         }, timeoutMs);
 
@@ -77,7 +79,7 @@ async function main() {
     logger.error({ container: id, detail: shortErr }, 'Failed to remove container');
         process.exitCode = 1;
 
-    } catch (err: any) {
+    } catch (err: unknown) {
     logger.error({ container: id, err }, 'Error while attempting to destroy container');
         process.exitCode = 1;
     }
