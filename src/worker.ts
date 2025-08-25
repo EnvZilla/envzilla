@@ -94,10 +94,12 @@ export async function buildForPR(
             // If we have repository info in env, post a comment to the PR with the link
             // Expect REPO_FULL_NAME like owner/repo
             const repoFullName = process.env.REPO_FULL_NAME || repoURL?.replace(/^https:\/\/(github\.com\/)?/, '').replace(/\.git$/, '');
-            if (repoFullName && process.env.GITHUB_TOKEN) {
+            // Use per-job ephemeral token if available (in CI/GitHub App flow this will be provided per job)
+            const ephemeralToken = process.env.EPHEMERAL_GITHUB_TOKEN || process.env.GITHUB_TOKEN;
+            if (repoFullName && ephemeralToken) {
                 const body = `Preview environment available: ${publicUrl}\n\nContainer: ${buildResult.containerId}\nPort: ${buildResult.hostPort}`;
                 // best-effort post; do not fail the build if comment fails
-                try { await postPRComment(repoFullName, prNumber, body); } catch (err: any) { logger.warn({ err, pr: prNumber }, 'Failed to post PR comment'); }
+                try { await postPRComment(ephemeralToken, repoFullName, prNumber, body); } catch (err: any) { logger.warn({ err, pr: prNumber }, 'Failed to post PR comment'); }
             } else {
                 logger.info({ repoFullName }, 'No repo information or GITHUB_TOKEN; skipping PR comment');
             }

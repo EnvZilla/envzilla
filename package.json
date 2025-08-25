@@ -36,6 +36,8 @@
     "typescript": "^5.9.2"
   },
   "dependencies": {
+    "@octokit/core": "^7.0.3",
+    "@octokit/rest": "^22.0.0",
     "@types/dockerode": "^3.3.43",
     "cors": "^2.8.5",
     "dockerode": "^4.0.7",
