@@ -72,7 +72,7 @@ export default [
     },
   },
   {
-    // Ignore temp directory files
-    ignores: ['temp/**/*'],
+    // Ignore temp & dist directory files
+    ignores: ['temp/**/*','dist/**/*'],
   },
 ];
