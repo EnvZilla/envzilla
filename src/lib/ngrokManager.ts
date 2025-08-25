@@ -10,6 +10,10 @@ export interface TunnelInfo {
 
 // Track ngrok CLI processes by PR number so we can stop them later
 const ngrokProcesses = new Map<number, ChildProcess>();
+// When using a single agent, we track the long-lived agent process and per-PR tunnel names
+let sharedAgent: ChildProcess | null = null;
+let sharedAgentStarting: Promise<void> | null = null;
+const prTunnelNames = new Map<number, string>();
 
 /**
  * Poll the local ngrok API for tunnels and return the public URL for the given local port.
@@ -73,31 +77,60 @@ export async function startHttpTunnel(port: number, name?: string, region?: stri
   // (acts like a guest/valet)
   delete (childEnv as any).NGROK_AUTHTOKEN;
 
-  const child = spawn('ngrok', args, { stdio: ['ignore', 'pipe', 'pipe'], env: childEnv });
+  // If we can, prefer creating tunnels on a single shared agent process to avoid ERR_NGROK_108
+  try {
+    await ensureSharedAgent(prNumber);
+    const publicUrl = await createTunnelViaApi(port, name, prNumber);
+    logger.info({ publicUrl, port, prNumber }, '✅ ngrok tunnel established (shared agent)');
+    return { publicUrl, proto: 'http', port };
+  } catch (err) {
+    logger.warn({ err, pr: prNumber }, 'Failed to create tunnel via shared ngrok agent, falling back to per-process CLI');
+    // fall through to previous per-process behavior below
+  }
 
+  // Capture any existing user token so we can fall back to an authenticated run
+  const originalToken = (process.env as any).NGROK_AUTHTOKEN;
+
+  // We'll allow replacing the child if we need to restart with auth
+  let child: ChildProcess = spawn('ngrok', args, { stdio: ['ignore', 'pipe', 'pipe'], env: childEnv });
   if (prNumber) ngrokProcesses.set(prNumber, child);
 
-  child.stdout?.on('data', (b) => {
-    const s = b.toString();
-    logger.info({ pr: prNumber, chunk: s.trim() }, 'ngrok stdout');
-  });
+  const attachStdHandlers = (c: ChildProcess) => {
+    c.stdout?.on('data', (b) => {
+      const s = b.toString();
+      logger.info({ pr: prNumber, chunk: s.trim() }, 'ngrok stdout');
+    });
 
-  // Promise that will be rejected if ngrok emits the auth error on stderr
+    c.stderr?.on('data', (b) => {
+      const s = b.toString();
+      logger.warn({ pr: prNumber, chunk: s.trim() }, 'ngrok stderr');
+
+      // If ngrok reports the auth-required error, try to restart with the user's token
+      if (s.includes('ERR_NGROK_108')) {
+        logger.warn({ pr: prNumber }, 'ngrok CLI reported ERR_NGROK_108 (auth required)');
+        try { c.kill(); } catch {}
+        if (prNumber) ngrokProcesses.delete(prNumber);
+
+        if (originalToken) {
+          logger.info({ pr: prNumber }, 'Retrying ngrok with NGROK_AUTHTOKEN from environment');
+          // spawn a new process using the original environment (which includes the token)
+          const authEnv = { ...process.env, NGROK_AUTHTOKEN: originalToken } as NodeJS.ProcessEnv;
+          child = spawn('ngrok', args, { stdio: ['ignore', 'pipe', 'pipe'], env: authEnv });
+          if (prNumber) ngrokProcesses.set(prNumber, child);
+          attachStdHandlers(child);
+        } else {
+          // No token to fall back to — surface an error to the caller by rejecting the auth race
+          rejectAuth(new Error('ngrok CLI requires an auth token (ERR_NGROK_108)'));
+        }
+      }
+    });
+  };
+
+  attachStdHandlers(child);
+
+  // Promise that will be rejected if we cannot recover from auth error
   let rejectAuth: (err: any) => void = () => {};
   const authErrorPromise = new Promise<never>((_, rej) => { rejectAuth = rej; });
-
-  child.stderr?.on('data', (b) => {
-    const s = b.toString();
-    logger.warn({ pr: prNumber, chunk: s.trim() }, 'ngrok stderr');
-
-    // If ngrok reports the auth-required error, kill the process and surface an error
-    if (s.includes('ERR_NGROK_108')) {
-      logger.warn({ pr: prNumber }, 'ngrok CLI reported ERR_NGROK_108 (auth required) - killing process');
-      try { child.kill(); } catch {}
-      if (prNumber) ngrokProcesses.delete(prNumber);
-      rejectAuth(new Error('ngrok CLI requires an auth token (ERR_NGROK_108)'));
-    }
-  });
 
   try {
     // Race between obtaining the public URL and an immediate auth error from stderr
@@ -116,6 +149,14 @@ export async function startHttpTunnel(port: number, name?: string, region?: stri
 }
 
 export async function stopTunnelForPR(prNumber: number): Promise<void> {
+  // First, try to stop via shared agent API (if we created a named tunnel)
+  try {
+    await stopTunnelViaApi(prNumber);
+    logger.info({ pr: prNumber }, '🛑 ngrok tunnel stopped via shared agent API');
+  } catch (e) {
+    // ignore and try killing per-process child
+  }
+
   const child = ngrokProcesses.get(prNumber);
   if (!child) return;
   try {
@@ -133,5 +174,106 @@ export async function stopAllTunnels(): Promise<void> {
     ngrokProcesses.delete(pr);
   }
   logger.info({}, '🛑 All ngrok CLI processes killed');
+}
+
+/**
+ * Ensure a single shared ngrok agent is running. If not, spawn one (using user's env so it's authenticated if available).
+ */
+async function ensureSharedAgent(prNumber?: number): Promise<void> {
+  if (sharedAgent) return;
+  if (sharedAgentStarting) return sharedAgentStarting;
+
+  sharedAgentStarting = (async () => {
+    logger.info({ pr: prNumber }, 'Starting shared ngrok agent');
+    // Spawn ngrok agent with default env (so if NGROK_AUTHTOKEN exists it will be used)
+    const child = spawn('ngrok', ['start', '--none'], { stdio: ['ignore', 'pipe', 'pipe'], env: process.env });
+    sharedAgent = child;
+
+    child.stdout?.on('data', (b) => logger.info({ pr: prNumber, chunk: b.toString().trim() }, 'ngrok agent stdout'));
+    child.stderr?.on('data', (b) => logger.warn({ pr: prNumber, chunk: b.toString().trim() }, 'ngrok agent stderr'));
+
+    // Wait for local API to become available
+    const start = Date.now();
+    const apiUrl = 'http://127.0.0.1:4040/api/tunnels';
+    while (Date.now() - start < 10_000) {
+      try {
+        await new Promise<void>((res, rej) => {
+          http.get(apiUrl, (resStream) => { res(); }).on('error', (e) => rej(e));
+        });
+        return;
+      } catch (e) {
+        await new Promise((r) => setTimeout(r, 250));
+      }
+    }
+    throw new Error('Timed out waiting for shared ngrok agent API');
+  })();
+
+  return sharedAgentStarting;
+}
+
+/**
+ * Create a tunnel via ngrok local API and return public URL. Uses a named tunnel per PR when provided.
+ */
+async function createTunnelViaApi(port: number, name?: string, prNumber?: number, timeoutMs = 10_000): Promise<string> {
+  const start = Date.now();
+  const apiUrl = `http://127.0.0.1:4040/api/tunnels`;
+
+  // Create a unique name per PR when possible
+  const tunnelName = name || (prNumber ? `envzilla-pr-${prNumber}` : `envzilla-${Date.now()}`);
+  if (prNumber) prTunnelNames.set(prNumber, tunnelName);
+
+  // Try to create a tunnel by POSTing to the local API
+  const payload = JSON.stringify({ name: tunnelName, addr: String(port) });
+
+  const doPost = () => new Promise<void>((resolve, reject) => {
+    const req = http.request(apiUrl, { method: 'POST', headers: { 'Content-Type': 'application/json', 'Content-Length': String(payload.length) } }, (res) => {
+      const chunks: Buffer[] = [];
+      res.on('data', (c) => chunks.push(c));
+      res.on('end', () => {
+        try {
+          const body = Buffer.concat(chunks).toString();
+          const data = JSON.parse(body);
+          if (data.public_url) return resolve();
+          return reject(new Error('ngrok API did not return public_url on create'));
+        } catch (e) { return reject(e); }
+      });
+    });
+    req.on('error', (e) => reject(e));
+    req.write(payload);
+    req.end();
+  });
+
+  // attempt create and then poll for the tunnel entry
+  try {
+    await doPost();
+  } catch (e) {
+    // ignore and poll; sometimes create may return 409 if already exists
+  }
+
+  // Poll for the tunnel to appear
+  while (Date.now() - start < timeoutMs) {
+    try {
+      const publicUrl = await pollNgrokApiForPort(port, 1000);
+      if (publicUrl) return publicUrl;
+    } catch (e) {
+      // continue polling
+    }
+    await new Promise((r) => setTimeout(r, 250));
+  }
+  throw new Error('Timed out waiting for tunnel creation via ngrok API');
+}
+
+/**
+ * Stop a tunnel created via the shared agent using the local API and PR mapping
+ */
+async function stopTunnelViaApi(prNumber: number): Promise<void> {
+  const name = prTunnelNames.get(prNumber);
+  if (!name) return;
+  const apiUrl = `http://127.0.0.1:4040/api/tunnels/${encodeURIComponent(name)}`;
+  return new Promise((resolve) => {
+    const req = http.request(apiUrl, { method: 'DELETE' }, (res) => { res.on('data', () => {}); res.on('end', () => { prTunnelNames.delete(prNumber); resolve(); }); });
+    req.on('error', () => resolve());
+    req.end();
+  });
 }
 
