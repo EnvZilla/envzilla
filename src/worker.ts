@@ -8,6 +8,8 @@ import {
     cleanupTempDir,
     BuildResult 
 } from './lib/buildContainer.js';
+import { startHttpTunnel, stopTunnel } from './lib/ngrokManager.js';
+import { postPRComment } from './lib/githubClient.js';
 import { 
     destroyContainer, 
     destroyByPRNumber,
@@ -82,12 +84,33 @@ export async function buildForPR(
         await cleanupTempDir(tempDir);
         
         // Format output to match expected format
+        // Start an ngrok tunnel for the container port so it is reachable externally
+        let publicUrl = `http://localhost:${buildResult.hostPort}`;
+        try {
+            const name = `envzilla-pr-${prNumber}`;
+            const tunnel = await startHttpTunnel(buildResult.hostPort, name);
+            publicUrl = tunnel.publicUrl;
+
+            // If we have repository info in env, post a comment to the PR with the link
+            // Expect REPO_FULL_NAME like owner/repo
+            const repoFullName = process.env.REPO_FULL_NAME || repoURL?.replace(/^https:\/\/(github\.com\/)?/, '').replace(/\.git$/, '');
+            if (repoFullName && process.env.GITHUB_TOKEN) {
+                const body = `Preview environment available: ${publicUrl}\n\nContainer: ${buildResult.containerId}\nPort: ${buildResult.hostPort}`;
+                // best-effort post; do not fail the build if comment fails
+                try { await postPRComment(repoFullName, prNumber, body); } catch (err: any) { logger.warn({ err, pr: prNumber }, 'Failed to post PR comment'); }
+            } else {
+                logger.info({ repoFullName }, 'No repo information or GITHUB_TOKEN; skipping PR comment');
+            }
+        } catch (err: any) {
+            logger.warn({ err, pr: prNumber }, 'Failed to start ngrok tunnel; falling back to localhost');
+        }
+
         const stdout = JSON.stringify({
             message: 'Container started',
             containerId: buildResult.containerId,
             hostPort: buildResult.hostPort,
             imageName: buildResult.imageName,
-            previewUrl: `http://localhost:${buildResult.hostPort}`
+            previewUrl: publicUrl
         }, null, 2);
         
         logger.info({ 

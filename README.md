@@ -52,6 +52,22 @@ The system is split into two primary components for scalability and raw power:
 
 3.  **Unleash the Beast**:
     * Use `ngrok` to expose your local port 3000 and update your GitHub App's webhook URL.
+
+Exposing a preview and posting PR comment
+----------------------------------------
+
+You can use the provided helper script to open an ngrok HTTP tunnel to a local port and optionally post the public URL as a comment on a GitHub PR.
+
+Example:
+
+    # Install dependencies
+    npm install
+
+    # Start your preview (container) so the app is reachable on localhost:3000
+    # then in another terminal run:
+    node scripts/expose-and-comment.js --port 3000 --owner EnvZilla --repo envzilla --pr 123
+
+To auto-post a comment you must set GITHUB_TOKEN (a repo-scoped token with permission to create issue comments) in the environment. Optionally set NGROK_AUTHTOKEN to use your ngrok account.
     * Run the entire stack with a single command:
         ```bash
         docker-compose up --build -d
