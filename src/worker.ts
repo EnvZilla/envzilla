@@ -33,7 +33,9 @@ function runLocalScript(args: string[], cwd = process.cwd(), timeoutMs = 10 * 60
         let stdout = '';
         let stderr = '';
         const timer = setTimeout(() => {
-            try { child.kill('SIGKILL'); } catch {}
+            try { child.kill('SIGKILL'); } catch {
+                // Ignore kill errors
+            }
             reject(new Error(`Script ${args.join(' ')} timed out after ${timeoutMs}ms`));
         }, timeoutMs);
 
@@ -47,7 +49,7 @@ function runLocalScript(args: string[], cwd = process.cwd(), timeoutMs = 10 * 60
 
 // Windows needs pipe path; other OS use default socket/ENV
 const dockerOptions = process.platform === 'win32' ? { socketPath: '//./pipe/docker_engine' } : undefined;
-const docker = new Docker(dockerOptions);
+new Docker(dockerOptions);
 
 /**
  * Build a container for a PR by cloning the repository and building a Docker image.
@@ -67,9 +69,6 @@ export async function buildForPR(
 
     // Ensure repoURL present
     if (!repoURL) throw new Error('Missing repoURL for build');
-
-    // Use naming convention to track containers
-    const containerName = `preview-${prNumber}`;
 
     // Ensure Docker is available
     await ensureDockerIsAvailable();
@@ -102,10 +101,10 @@ export async function buildForPR(
                     try {
                         const controller = new AbortController();
                         const id = setTimeout(() => controller.abort(), timeoutMs);
-                        const res = await (globalThis as any).fetch(url, { method: 'GET', signal: controller.signal });
+                        const res = await fetch(url, { method: 'GET', signal: controller.signal });
                         clearTimeout(id);
                         if (res && res.ok) return;
-                    } catch (e) {
+                    } catch {
                         // ignore and retry
                     }
                     await new Promise((r) => setTimeout(r, delayMs));
@@ -116,8 +115,8 @@ export async function buildForPR(
             try {
                 await waitForUrl(publicUrl);
                 logger.info({ pr: prNumber, publicUrl }, 'Preview URL is responsive');
-            } catch (e: any) {
-                logger.warn({ pr: prNumber, publicUrl, err: e?.message }, 'Preview URL did not become responsive in time — will still post comment but note it may be unavailable');
+            } catch (e: unknown) {
+                logger.warn({ pr: prNumber, publicUrl, err: e instanceof Error ? e.message : String(e) }, 'Preview URL did not become responsive in time — will still post comment but note it may be unavailable');
             }
 
             // If we have repository info in env, post a comment to the PR with the link
@@ -144,8 +143,8 @@ export async function buildForPR(
             if (!ephemeralToken && installationId) {
                 try {
                     ephemeralToken = await getInstallationAccessToken(installationId);
-                } catch (e: any) {
-                    logger.warn({ pr: prNumber, installationId, err: e?.message }, 'Failed to create installation access token');
+                } catch (e: unknown) {
+                    logger.warn({ pr: prNumber, installationId, err: e instanceof Error ? e.message : String(e) }, 'Failed to create installation access token');
                 }
             }
 
@@ -161,11 +160,11 @@ export async function buildForPR(
                     `Port: ${buildResult.hostPort}`
                 ].join('\n');
                 // best-effort post; do not fail the build if comment fails
-                try { await postPRComment(ephemeralToken, repoFullName, prNumber, body); } catch (err: any) { logger.warn({ err, pr: prNumber }, 'Failed to post PR comment'); }
+                try { await postPRComment(ephemeralToken, repoFullName, prNumber, body); } catch (err: unknown) { logger.warn({ err, pr: prNumber }, 'Failed to post PR comment'); }
             } else {
                 logger.info({ repoFullName }, 'No repo information or GITHUB_TOKEN; skipping PR comment');
             }
-        } catch (err: any) {
+        } catch (err: unknown) {
             logger.warn({ err, pr: prNumber }, 'Failed to start ngrok tunnel; falling back to localhost');
         }
 
@@ -195,12 +194,12 @@ export async function buildForPR(
         logger.info({ pr: prNumber }, '🔄 Using legacy build script approach');
         return runLocalScript(['tsx', 'build.ts']);
     }
-  } catch (err: any) {
-    logger.error({ pr: prNumber, error: err.stack || err.message }, '💥 buildForPR error');
+  } catch (err: unknown) {
+    logger.error({ pr: prNumber, error: err instanceof Error ? (err.stack || err.message) : String(err) }, '💥 buildForPR error');
     return {
       code: 1,
       stdout: '',
-      stderr: err.message || String(err),
+      stderr: err instanceof Error ? err.message : String(err),
       startedAt,
       completedAt: Date.now()
     } as BuildForPRResult;
@@ -252,7 +251,7 @@ export async function destroyForPR(containerId: string, prNumber?: number): Prom
                 imageDestroyed: destroyResult.imageDestroyed
             }, '✅ Integrated destroy completed successfully');
             // Attempt to stop any ngrok tunnel tied to this PR
-            try { if (prNumber) await stopTunnelForPR(prNumber); } catch (err: any) { logger.warn({ err, pr: prNumber }, 'Failed to stop ngrok tunnel for PR'); }
+            try { if (prNumber) await stopTunnelForPR(prNumber); } catch (err: unknown) { logger.warn({ err, pr: prNumber }, 'Failed to stop ngrok tunnel for PR'); }
         }
         
         return {
@@ -262,8 +261,8 @@ export async function destroyForPR(containerId: string, prNumber?: number): Prom
             destroyResult
         };
         
-    } catch (error: any) {
-        logger.error({ pr: prNumber, containerId, error: error.message }, '❌ Destroy process failed');
+    } catch (error: unknown) {
+        logger.error({ pr: prNumber, containerId, error: error instanceof Error ? error.message : String(error) }, '❌ Destroy process failed');
         
         // Fallback to legacy destroy script approach
         logger.info({ pr: prNumber, containerId }, '🔄 Falling back to legacy destroy script');

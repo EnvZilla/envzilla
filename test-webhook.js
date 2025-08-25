@@ -1,4 +1,5 @@
 // /c:/Users/asd/Documents/Github/envzilla/test-webhook.js
+/* eslint-disable no-console */
 import crypto from 'crypto';
 import { fileURLToPath } from 'url';
 

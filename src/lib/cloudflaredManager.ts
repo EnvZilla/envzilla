@@ -13,7 +13,7 @@ export interface TunnelInfo {
 const cloudflaredProcesses = new Map<number, ChildProcess>();
 
 function extractUrlFromChunk(chunk: string): string | null {
-  const m = chunk.match(/https?:\/\/[^\s'"\)]+/i);
+  const m = chunk.match(/https?:\/\/[^\s'"]+/i);
   return m ? m[0] : null;
 }
 
@@ -37,7 +37,7 @@ function isIgnorableCloudflareUrl(urlStr: string): boolean {
     if (host.endsWith('cloudflare.com') && !host.endsWith('trycloudflare.com')) return true;
 
     return false;
-  } catch (e) {
+  } catch {
     return false;
   }
 }
@@ -80,7 +80,9 @@ export async function startHttpTunnel(port: number, name?: string, region?: stri
     const timeout = setTimeout(() => {
       if (resolved) return;
       resolved = true;
-      try { child.kill(); } catch {}
+      try { child.kill(); } catch {
+        // Ignore kill errors
+      }
       if (prNumber) cloudflaredProcesses.delete(prNumber);
       reject(new Error('Timed out waiting for cloudflared to print public URL'));
     }, timeoutMs);
@@ -123,7 +125,9 @@ export async function startHttpTunnel(port: number, name?: string, region?: stri
       if (/exited unexpectedly|exit|panic|fatal|unable to|failed to initialize/i.test(s) && !resolved) {
         resolved = true;
         clearTimeout(timeout);
-        try { child.kill(); } catch {}
+        try { child.kill(); } catch {
+          // Ignore kill errors
+        }
         if (prNumber) cloudflaredProcesses.delete(prNumber);
         // Add the original stderr output to the error for debugging.
         const hint = /receive buffer size/i.test(s) ? ' (UDP buffer issue detected; try --protocol http2 or increase host UDP buffer limits)' : '';
@@ -152,14 +156,16 @@ export async function stopTunnelForPR(prNumber: number): Promise<void> {
     child.kill();
     cloudflaredProcesses.delete(prNumber);
     logger.info({ pr: prNumber }, '🛑 cloudflared process killed for PR');
-  } catch (err: any) {
+  } catch (err: unknown) {
     logger.warn({ err, pr: prNumber }, 'Failed to kill cloudflared process for PR');
   }
 }
 
 export async function stopAllTunnels(): Promise<void> {
   for (const [pr, child] of cloudflaredProcesses.entries()) {
-    try { child.kill(); } catch {}
+    try { child.kill(); } catch {
+      // Ignore kill errors
+    }
     cloudflaredProcesses.delete(pr);
   }
   logger.info({}, '🛑 All cloudflared processes killed');

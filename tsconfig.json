@@ -4,7 +4,6 @@
         "module": "NodeNext",
         "moduleResolution": "NodeNext",
         "outDir": "./dist",
-        "rootDir": "./src",
         "strict": true,
         "esModuleInterop": true,
         "allowSyntheticDefaultImports": true,
@@ -17,6 +16,13 @@
     "declaration": true,
     "declarationMap": true
     },
-    "include": ["src/**/*"],
-    "exclude": ["node_modules", "dist"]
+    "include": [
+        "src/**/*",
+        "build.ts",
+        "destroy.ts",
+        "lib/**/*.ts",
+        "test-webhook.js",
+        "sample-app/index.js"
+    ],
+    "exclude": ["node_modules", "dist", "temp/**/*"]
 }

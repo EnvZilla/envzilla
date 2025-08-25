@@ -76,7 +76,7 @@ export interface WebhookProcessingResult {
   action: string;
   prNumber: number;
   message: string;
-  data?: any;
+  data?: unknown;
   error?: string;
 }
 

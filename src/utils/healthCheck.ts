@@ -37,7 +37,11 @@ async function checkDockerHealth(): Promise<boolean> {
       const timeout = setTimeout(() => {
         if (!resolved) {
           resolved = true;
-          try { child.kill(); } catch {}
+          try { 
+            child.kill(); 
+          } catch {
+            // Ignore kill errors if process is already dead
+          }
           resolve(false);
         }
       }, 5000);

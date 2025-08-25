@@ -11,8 +11,6 @@ import logger from './utils/logger.js';
 import { verifySignature } from './middlewares/verifySignature.js';
 import { dispatchWebhookEvent, getDeploymentInfo, getAllDeployments, cleanupStaleDeployments } from './middlewares/dispatcherServer.js';
 import { performHealthCheck, logHealthStatus } from './utils/healthCheck.js';
-import { spawn } from 'child_process';
-import * as worker from './worker.js';
 
 const app: Express = express();
 const PORT: number = Number(process.env.PORT) || 3000;
@@ -51,7 +49,7 @@ app.use(
 // verification without consuming the stream twice.
 app.use(express.json({
 	limit: '1mb',
-	verify: (req: any, _res, buf: Buffer) => {
+	verify: (req: Request & { rawBody?: Buffer }, _res, buf: Buffer) => {
 		// Save raw buffer for signature verification middleware
 		req.rawBody = buf;
 	},
@@ -78,8 +76,8 @@ app.get('/health', async (req: Request, res: Response) => {
 						   health.status === 'degraded' ? 206 : 503;
 		
 		res.status(statusCode).json(health);
-	} catch (error: any) {
-		logger.error({ error: error.message }, 'Health check failed');
+	} catch (error: unknown) {
+		logger.error({ error: error instanceof Error ? error.message : String(error) }, 'Health check failed');
 		res.status(503).json({
 			status: 'unhealthy',
 			timestamp: Date.now(),
@@ -154,9 +152,8 @@ app.post(
 	(req: Request, res: Response) => {
 		logger.info({ topic: 'webhook', provider: 'github' }, '📦 Received GitHub Webhook Payload');
 		// Also print the full payload to the terminal for debugging
-		// eslint-disable-next-line no-console
 		if (process.env.NODE_ENV !== 'production') {
-			console.dir(req.body, { depth: null });
+			logger.debug({ payload: req.body }, '🔍 Full webhook payload');
 		}
 		res.status(200).send('Webhook received');
 	}
@@ -168,7 +165,7 @@ app.use((req: Request, res: Response) => {
 });
 
 // Centralized error handler — don't leak stack in production
-app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
+app.use((err: Error & { status?: number }, _req: Request, res: Response, _next: NextFunction) => {
 	logger.error({ err }, 'Unhandled error');
 	const status = err?.status || 500;
 	const message = process.env.NODE_ENV === 'production' ? 'Internal Server Error' : err?.message || 'Internal Server Error';
@@ -186,8 +183,8 @@ app.listen(PORT, () => {
 			if (cleanedCount > 0) {
 				logger.info({ cleanedCount }, 'Scheduled cleanup completed');
 			}
-		} catch (error: any) {
-			logger.error({ error: error.message }, 'Error during scheduled cleanup');
+		} catch (error: unknown) {
+			logger.error({ error: error instanceof Error ? error.message : String(error) }, 'Error during scheduled cleanup');
 		}
 	}, 6 * 60 * 60 * 1000); // 6 hours
 
@@ -196,8 +193,8 @@ app.listen(PORT, () => {
 		try {
 			const health = await performHealthCheck();
 			logHealthStatus(health);
-		} catch (error: any) {
-			logger.error({ error: error.message }, 'Error during health check');
+		} catch (error: unknown) {
+			logger.error({ error: error instanceof Error ? error.message : String(error) }, 'Error during health check');
 		}
 	}, 5 * 60 * 1000); // 5 minutes
 

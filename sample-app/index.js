@@ -4,7 +4,7 @@ const PORT = process.env.PORT || 3000;
 
 // Helper to escape user-provided values (tiny and safe for this demo)
 function esc(s) {
-  return String(s || '').replace(/[&<>\"']/g, (c) => ({
+  return String(s || '').replace(/[&<>"']/g, (c) => ({
     '&': '&amp;',
     '<': '&lt;',
     '>': '&gt;',
@@ -71,5 +71,6 @@ app.get('/health', (req, res) => {
 });
 
 app.listen(PORT, () => {
+  // eslint-disable-next-line no-console
   console.log(`EnvZilla sample app roaring on port ${PORT} — press CTRL+C to calm the beast`);
 });
