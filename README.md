@@ -169,6 +169,15 @@ EnvZilla can be tamed through environment variables:
 | `REDIS_PASSWORD` | Redis authentication password | *(none)* |
 | `REDIS_DB` | Redis database number | `0` |
 
+### Health Check Configuration
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `CONTAINER_HEALTH_TIMEOUT_MS` | Max time to wait for container health | `30000` (30s) |
+| `PREVIEW_URL_TIMEOUT_MS` | Total timeout for preview URL checks | `50000` (50s) |
+| `PREVIEW_URL_ATTEMPTS` | Number of attempts to check preview URL | `10` |
+| `PREVIEW_URL_DELAY_MS` | Delay between preview URL attempts | `2000` (2s) |
+| `PREVIEW_URL_REQUEST_TIMEOUT_MS` | Timeout per preview URL request | `5000` (5s) |
+
 ### Job Queue Configuration
 | Variable | Description | Default |
 |----------|-------------|---------|

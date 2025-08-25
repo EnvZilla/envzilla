@@ -96,20 +96,32 @@ export async function buildForPR(
 
             // Wait for the preview URL to become responsive before posting a PR comment.
             // This avoids writing a comment too early while the app or tunnel is still coming up.
-            async function waitForUrl(url: string, attempts = 6, delayMs = 1000, timeoutMs = 3000) {
+            // Configuration can be customized via environment variables.
+            const urlConfig = {
+                attempts: Number(process.env.PREVIEW_URL_ATTEMPTS) || 10,
+                delayMs: Number(process.env.PREVIEW_URL_DELAY_MS) || 2000,
+                timeoutMs: Number(process.env.PREVIEW_URL_REQUEST_TIMEOUT_MS) || 5000
+            };
+            
+            async function waitForUrl(url: string, attempts = urlConfig.attempts, delayMs = urlConfig.delayMs, timeoutMs = urlConfig.timeoutMs) {
                 for (let i = 0; i < attempts; i++) {
                     try {
                         const controller = new AbortController();
                         const id = setTimeout(() => controller.abort(), timeoutMs);
                         const res = await fetch(url, { method: 'GET', signal: controller.signal });
                         clearTimeout(id);
-                        if (res && res.ok) return;
-                    } catch {
-                        // ignore and retry
+                        if (res && res.ok) {
+                            logger.info({ pr: prNumber, url, attempt: i + 1 }, '✅ Preview URL responded successfully');
+                            return;
+                        }
+                    } catch (error: unknown) {
+                        logger.debug({ pr: prNumber, url, attempt: i + 1, error: error instanceof Error ? error.message : String(error) }, '⏳ Preview URL not ready yet, retrying...');
                     }
-                    await new Promise((r) => setTimeout(r, delayMs));
+                    if (i < attempts - 1) { // Don't delay after the last attempt
+                        await new Promise((r) => setTimeout(r, delayMs));
+                    }
                 }
-                throw new Error(`Timed out waiting for preview URL to respond: ${url}`);
+                throw new Error(`Timed out waiting for preview URL to respond after ${attempts} attempts: ${url}`);
             }
 
             try {

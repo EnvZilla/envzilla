@@ -13,6 +13,19 @@ const DOCKER_CONFIG = {
     // Default timeout for operations.
     buildTimeoutMs: 10 * 60 * 1000, // 10 minutes
     runTimeoutMs: 60 * 1000, // 1 minute
+    // Container health check timeout (configurable via env)
+    healthCheckTimeoutMs: Number(process.env.CONTAINER_HEALTH_TIMEOUT_MS) || 30_000, // 30 seconds
+};
+
+/**
+ * Configuration for preview URL health checks.
+ */
+const HEALTH_CHECK_CONFIG = {
+    // URL response timeout (configurable via env)
+    urlTimeoutMs: Number(process.env.PREVIEW_URL_TIMEOUT_MS) || 50_000, // 50 seconds total
+    attempts: Number(process.env.PREVIEW_URL_ATTEMPTS) || 10,
+    delayMs: Number(process.env.PREVIEW_URL_DELAY_MS) || 2000, // 2 seconds between attempts
+    requestTimeoutMs: Number(process.env.PREVIEW_URL_REQUEST_TIMEOUT_MS) || 5000, // 5 seconds per request
 };
 
 /**
@@ -198,6 +211,72 @@ export async function buildContainerFromPath(
 }
 
 /**
+ * Wait for a container to become healthy or ready
+ */
+async function waitForContainerHealth(containerId: string, prNumber: number, maxWaitMs = DOCKER_CONFIG.healthCheckTimeoutMs): Promise<boolean> {
+    const startTime = Date.now();
+    const checkInterval = 2000; // Check every 2 seconds
+    
+    logger.info({ containerId: containerId.substring(0, 12), prNumber }, '⏳ Waiting for container to become healthy...');
+    
+    while (Date.now() - startTime < maxWaitMs) {
+        try {
+            // Check container status
+            const { stdout: statusOutput, exitCode: statusCode } = await runCommand('docker', [
+                'inspect', containerId, '--format', '{{.State.Health.Status}}'
+            ], { timeoutMs: 5000 });
+            
+            if (statusCode === 0) {
+                const healthStatus = statusOutput.trim();
+                logger.debug({ containerId: containerId.substring(0, 12), healthStatus, prNumber }, 'Container health status check');
+                
+                if (healthStatus === 'healthy') {
+                    logger.info({ containerId: containerId.substring(0, 12), prNumber }, '✅ Container is healthy');
+                    return true;
+                } else if (healthStatus === 'unhealthy') {
+                    logger.warn({ containerId: containerId.substring(0, 12), prNumber }, '❌ Container reported unhealthy status');
+                    return false;
+                }
+                // If health status is "starting" or no healthcheck, continue waiting
+            }
+            
+            // Fallback: check if container is running and port is responsive
+            const { stdout: runningOutput, exitCode: runningCode } = await runCommand('docker', [
+                'inspect', containerId, '--format', '{{.State.Running}}'
+            ], { timeoutMs: 5000 });
+            
+            if (runningCode === 0 && runningOutput.trim() === 'true') {
+                // Container is running, try to connect to the port
+                try {
+                    const { stdout: portOutput } = await runCommand('docker', [
+                        'port', containerId, '3000'
+                    ], { timeoutMs: 5000 });
+                    
+                    if (portOutput.trim()) {
+                        logger.info({ containerId: containerId.substring(0, 12), prNumber }, '✅ Container is running and port is accessible');
+                        return true;
+                    }
+                } catch {
+                    // Port check failed, continue waiting
+                }
+            } else {
+                logger.warn({ containerId: containerId.substring(0, 12), prNumber }, '❌ Container is not running');
+                return false;
+            }
+            
+        } catch (error) {
+            logger.debug({ containerId: containerId.substring(0, 12), error: error instanceof Error ? error.message : String(error), prNumber }, 'Error checking container health');
+        }
+        
+        // Wait before next check
+        await new Promise(resolve => setTimeout(resolve, checkInterval));
+    }
+    
+    logger.warn({ containerId: containerId.substring(0, 12), prNumber, maxWaitMs }, '⏰ Timeout waiting for container to become healthy');
+    return false;
+}
+
+/**
  * Run a Docker container with the specified image and port mapping
  */
 async function runContainer(imageName: string, hostPort: number, prNumber: number): Promise<string> {
@@ -226,6 +305,12 @@ async function runContainer(imageName: string, hostPort: number, prNumber: numbe
     const containerId = stdout.trim().split('\n')[0] || '';
     if (!containerId) {
         throw new Error('Failed to parse container ID from docker run output');
+    }
+
+    // Wait for container to become healthy
+    const isHealthy = await waitForContainerHealth(containerId, prNumber);
+    if (!isHealthy) {
+        logger.warn({ containerId: containerId.substring(0, 12), prNumber }, '⚠️ Container started but health check failed - proceeding anyway');
     }
 
     return containerId;
