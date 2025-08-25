@@ -194,16 +194,33 @@ async function handleCreateOrUpdate(
     }, '🔓 Decrypted sensitive data for build process');
 
     // Trigger build process asynchronously
-    worker.buildForPR(prNumber)
+    const branch = payload.pull_request?.head.ref;
+    const repoURL = payload.pull_request?.head.repo.clone_url;
+
+    // DEBUG: log before invoking worker
+    logger.info({ pr: prNumber, branch, repoURL }, '▶️ Invoking worker.buildForPR');
+
+    worker.buildForPR(prNumber, branch, repoURL)
       .then(result => {
+        logger.info({ pr: prNumber, result }, '🔔 buildForPR finished'); // <-- daha ayrıntılı log
         if (result.code === 0) {
-          // Parse build output for container info
-          const stdout = result.stdout || '';
-          const containerIdMatch = stdout.match(/Container started.*containerId:\s*"([a-f0-9]{12,64})"/i);
-          const portMatch = stdout.match(/hostPort:\s*(\d+)/i);
-          
-          const containerId = containerIdMatch ? containerIdMatch[1] : undefined;
-          const hostPort = portMatch ? Number(portMatch[1]) : undefined;
+          let containerId: string | undefined;
+          let hostPort: number | undefined;
+
+          // Try to parse JSON output from integrated approach
+          try {
+            const buildOutput = JSON.parse(result.stdout);
+            containerId = buildOutput.containerId;
+            hostPort = buildOutput.hostPort;
+          } catch {
+            // Fallback to legacy parsing for build.ts script output
+            const stdout = result.stdout || '';
+            const containerIdMatch = stdout.match(/Container started.*containerId:\s*"([a-f0-9]{12,64})"/i);
+            const portMatch = stdout.match(/hostPort:\s*(\d+)/i);
+            
+            containerId = containerIdMatch ? containerIdMatch[1] : undefined;
+            hostPort = portMatch ? Number(portMatch[1]) : undefined;
+          }
 
           if (containerId && hostPort) {
             deployments.set(prNumber, {
@@ -232,12 +249,7 @@ async function handleCreateOrUpdate(
         }
       })
       .catch(error => {
-        logger.error({ pr: prNumber, error: error.message }, '❌ Build process failed');
-        deployments.set(prNumber, {
-          ...deployments.get(prNumber),
-          status: 'failed',
-          lastError: error.message
-        } as DeploymentInfo);
+        logger.error({ pr: prNumber, error: error.stack || error.message }, '❌ Build process failed');
       });
 
   } catch (error: any) {

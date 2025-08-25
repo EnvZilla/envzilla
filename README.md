@@ -73,3 +73,24 @@ The system is split into two primary components for scalability and raw power:
 * **Code of Conduct**: All participants are expected to follow our **[Code of Conduct](./CODE_OF_CONDUCT.md)**.
 * **Security**: For a breakdown of risks and responsible disclosure, see our **[Security Guide](./SECURITY.md)**.
 * **License & Terms**: This project is licensed under the MIT License. By using it, you agree to the **[Terms of Use](./TERMS.md)**.
+
+## ⚠️ Troubleshooting cloudflared (quick tunnels)
+
+If you see logs mentioning QUIC or UDP buffer sizes (for example: "failed to sufficiently increase receive buffer size"), cloudflared's default QUIC protocol may be failing to establish on your host. You can resolve this by either increasing your host UDP buffer limits or switching cloudflared to use HTTP/2 instead:
+
+- To temporarily switch protocol, set an environment variable before running EnvZilla:
+
+```bash
+export CLOUDFLARED_PROTOCOL=http2
+export CLOUDFLARED_STARTUP_TIMEOUT_MS=30000
+```
+
+- To increase UDP buffer limits on Linux/WSL2, run as root:
+
+```bash
+sudo sysctl -w net.core.rmem_max=8388608
+sudo sysctl -w net.core.rmem_default=8388608
+sudo sysctl --system
+```
+
+Switching to HTTP/2 avoids QUIC/UDP buffer issues and is the default behavior for new EnvZilla runs.
