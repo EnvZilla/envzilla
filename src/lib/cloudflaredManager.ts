@@ -18,6 +18,31 @@ function extractUrlFromChunk(chunk: string): string | null {
 }
 
 /**
+ * Returns true for URLs that are known non-tunnel Cloudflare links (for example
+ * the website-terms redirect) which should be ignored while waiting for the
+ * actual quick-tunnel public URL.
+ */
+function isIgnorableCloudflareUrl(urlStr: string): boolean {
+  try {
+    const u = new URL(urlStr);
+    const host = u.hostname.toLowerCase();
+    const path = u.pathname.toLowerCase();
+
+    // Cloudflare may print the website-terms link to stderr as a generic banner.
+    if ((host === 'www.cloudflare.com' || host === 'cloudflare.com') && path.includes('website-terms')) return true;
+
+    // Many cloudflared informational links live under cloudflare.com. Accept
+    // quick-tunnel subdomains from trycloudflare.com but ignore other
+    // cloudflare.com hosts which are unlikely to be a real tunnel endpoint.
+    if (host.endsWith('cloudflare.com') && !host.endsWith('trycloudflare.com')) return true;
+
+    return false;
+  } catch (e) {
+    return false;
+  }
+}
+
+/**
  * Start a Cloudflare Tunnel using the `cloudflared` binary. Requires cloudflared installed.
  * Spawns `cloudflared tunnel --url http://localhost:<port>` and resolves with the public URL parsed from stdout.
  */
@@ -67,6 +92,13 @@ export async function startHttpTunnel(port: number, name?: string, region?: stri
       if (resolved) return;
       const url = extractUrlFromChunk(trimmed);
       if (url) {
+        // Some cloudflared messages contain non-tunnel links (eg. website-terms).
+        // Ignore those and keep waiting for the actual quick-tunnel URL.
+        if (isIgnorableCloudflareUrl(url)) {
+          logger.info({ pr: prNumber, url }, 'Ignoring non-tunnel cloudflared URL');
+          return;
+        }
+
         resolved = true;
         clearTimeout(timeout);
         resolve(url);
