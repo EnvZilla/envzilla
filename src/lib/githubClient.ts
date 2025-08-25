@@ -16,6 +16,10 @@ export async function postPRComment(
   if (!owner || !repo) throw new Error('Invalid repo full name, expected owner/repo');
 
   logger.info({ owner, repo, prNumber }, '💬 Posting comment to PR');
-  await octokit.issues.createComment({ owner, repo, issue_number: prNumber, body });
+  // Use the modern REST namespace
+  await octokit.rest.issues.createComment({ owner, repo, issue_number: prNumber, body }).catch((err) => {
+    logger.warn({ owner, repo, prNumber, err }, 'octokit.rest.issues.createComment failed');
+    throw err;
+  });
   logger.info({ owner, repo, prNumber }, '✅ Posted PR comment');
 }

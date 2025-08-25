@@ -96,11 +96,32 @@ export async function buildForPR(
             // Expect REPO_FULL_NAME like owner/repo
             // Prefer explicit repo full name passed from the webhook (owner/repo).
             // Fallback to environment or derive from clone URL for backward-compat.
-            const repoFullName = repoFullNameArg || process.env.REPO_FULL_NAME || repoURL?.replace(/^https:\/\/(github\.com\/)?/, '').replace(/\.git$/, '');
+            const deriveRepoFullName = (explicit?: string, url?: string) => {
+                if (explicit) return explicit;
+                if (process.env.REPO_FULL_NAME) return process.env.REPO_FULL_NAME;
+                if (!url) return undefined;
+                // Support git@github.com:owner/repo.git and https://github.com/owner/repo.git
+                let s = url.trim();
+                // git@github.com:owner/repo.git
+                const m = s.match(/^git@[^:]+:(.+)$/);
+                if (m && m[1]) s = m[1];
+                else s = s.replace(/^https?:\/\/(?:www\.)?[^/]+\//, '');
+                return s.replace(/\.git$/, '');
+            };
+
+            const repoFullName = deriveRepoFullName(repoFullNameArg, repoURL);
             // Use per-job ephemeral token if available (in CI/GitHub App flow this will be provided per job)
             const ephemeralToken = process.env.EPHEMERAL_GITHUB_TOKEN || process.env.GITHUB_TOKEN;
             if (repoFullName && ephemeralToken) {
-                const body = `Preview environment available: ${publicUrl}\n\nContainer: ${buildResult.containerId}\nPort: ${buildResult.hostPort}`;
+                // Build a bilingual, light-hearted message as requested
+                const safeUrl = (publicUrl || '').toString().trim();
+                const body = [
+                    `👀 Envzilla is peeking at your preview environment — Envzilla ortamını dikizliyor 👀`,
+                    '',
+                    `Preview: ${safeUrl}`,
+                    `Container: ${buildResult.containerId}`,
+                    `Port: ${buildResult.hostPort}`
+                ].join('\n');
                 // best-effort post; do not fail the build if comment fails
                 try { await postPRComment(ephemeralToken, repoFullName, prNumber, body); } catch (err: any) { logger.warn({ err, pr: prNumber }, 'Failed to post PR comment'); }
             } else {
