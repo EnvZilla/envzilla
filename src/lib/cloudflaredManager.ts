@@ -1,206 +1,457 @@
 import { spawn, ChildProcess } from 'child_process';
 import fs from 'fs';
 import path from 'path';
+import { randomUUID } from 'crypto';
 import logger from '../utils/logger.js';
+import { getHostPortForContainer, portMappingCache } from './dockerPortManager.js';
 
 export interface TunnelInfo {
   publicUrl: string;
-  proto: string;
-  port: number;
+  process: ChildProcess;
+  subdomain: string;
+  actualPort: number;
+  tunnelId?: string;
 }
 
-// Track cloudflared processes by PR number so we can stop them later
-const cloudflaredProcesses = new Map<number, ChildProcess>();
-
-function extractUrlFromChunk(chunk: string): string | null {
-  const m = chunk.match(/https?:\/\/[^\s'"]+/i);
-  return m ? m[0] : null;
+// Enhanced process tracking with metadata
+interface TunnelProcess {
+  process: ChildProcess;
+  subdomain: string;
+  publicUrl: string;
+  startTime: number;
+  lastHealthCheck?: number;
 }
+
+const cloudflaredProcesses = new Map<number, TunnelProcess>();
+const prSubdomains = new Map<number, string>();
+
+// Global process cleanup with enhanced error handling
+const setupGlobalCleanup = (() => {
+  let setupDone = false;
+  return () => {
+    if (setupDone) return;
+    setupDone = true;
+
+    const cleanup = async (signal: string) => {
+      logger.info({ signal, processCount: cloudflaredProcesses.size }, '🧹 Global cleanup triggered');
+
+      const cleanupPromises = Array.from(cloudflaredProcesses.entries()).map(async ([prNumber, tunnelProcess]) => {
+        try {
+          tunnelProcess.process.kill('SIGTERM');
+
+          // Give process time to gracefully shutdown
+          await new Promise(resolve => setTimeout(resolve, 2000));
+
+          if (!tunnelProcess.process.killed) {
+            tunnelProcess.process.kill('SIGKILL');
+          }
+
+          logger.info({ pr: prNumber, subdomain: tunnelProcess.subdomain }, '✅ Cleaned up tunnel process');
+        } catch (error) {
+          logger.warn({ err: error, pr: prNumber }, '⚠️ Error during tunnel cleanup');
+        }
+      });
+
+      await Promise.allSettled(cleanupPromises);
+      cloudflaredProcesses.clear();
+      prSubdomains.clear();
+      portMappingCache.clear();
+
+      logger.info('🏁 Global tunnel cleanup complete');
+    };
+
+    process.on('exit', () => cleanup('exit'));
+    process.on('SIGINT', () => cleanup('SIGINT').then(() => process.exit(0)));
+    process.on('SIGTERM', () => cleanup('SIGTERM').then(() => process.exit(0)));
+  };
+})();
 
 /**
- * Returns true for URLs that are known non-tunnel Cloudflare links (for example
- * the website-terms redirect) which should be ignored while waiting for the
- * actual quick-tunnel public URL.
+ * Enhanced tunnel startup with optimized port detection
  */
-function isIgnorableCloudflareUrl(urlStr: string): boolean {
+export async function startHttpTunnel(
+  containerPort: number,
+  containerName: string,
+  prNumber?: number
+): Promise<TunnelInfo> {
+  setupGlobalCleanup();
+
+  logger.info({ containerPort, containerName, prNumber }, '🔌 Starting enhanced cloudflared tunnel');
+
+  // Get actual Docker host port using Docker API (faster than docker port command)
+  let actualPort: number;
   try {
-    const u = new URL(urlStr);
-    const host = u.hostname.toLowerCase();
-    const path = u.pathname.toLowerCase();
-
-    // Cloudflare may print the website-terms link to stderr as a generic banner.
-    if ((host === 'www.cloudflare.com' || host === 'cloudflare.com') && path.includes('website-terms')) return true;
-
-    // Many cloudflared informational links live under cloudflare.com. Accept
-    // quick-tunnel subdomains from trycloudflare.com but ignore other
-    // cloudflare.com hosts which are unlikely to be a real tunnel endpoint.
-    if (host.endsWith('cloudflare.com') && !host.endsWith('trycloudflare.com')) return true;
-
-    return false;
-  } catch {
-    return false;
-  }
-}
-
-/**
- * Start a Cloudflare Tunnel using the `cloudflared` binary. Requires cloudflared installed.
- * Spawns `cloudflared tunnel --url http://localhost:<port>` and resolves with the public URL parsed from stdout.
- */
-export async function startHttpTunnel(port: number, name?: string, region?: string, prNumber?: number): Promise<TunnelInfo> {
-  logger.info({ port, name, region, prNumber }, '🔌 Starting cloudflared tunnel');
-
-  const args = ['tunnel', '--url', `http://localhost:${port}`];
-
-  // Allow overriding the protocol via environment for testing (quic or http2).
-  // Default to http2 which avoids UDP buffer / QUIC issues on many hosts.
-  const protocol = process.env.CLOUDFLARED_PROTOCOL || 'http2';
-  args.push('--protocol', protocol);
-
-  // If keys/cert.pem exists, pass it as --origincert to cloudflared to use a session cert
-  try {
-    const certPath = path.resolve(process.cwd(), 'keys', 'cert.pem');
-    if (fs.existsSync(certPath)) {
-      args.push('--origincert', certPath);
-      logger.info({ pr: prNumber, certPath }, 'Using Cloudflare origincert for cloudflared');
-    }
-  } catch (_e) {
-    logger.warn({ err: _e, pr: prNumber }, 'Failed to check for cloudflared origincert, continuing without it');
+    actualPort = await getHostPortForContainer(containerName, containerPort);
+    logger.info({ containerName, containerPort, actualPort, prNumber }, '📍 Retrieved port mapping via Docker API');
+  } catch (error) {
+    logger.error({ err: error, containerName, containerPort, prNumber }, '❌ Failed to get port mapping');
+    throw error;
   }
 
-  const childEnv = { ...process.env };
+  // Generate UUID subdomain with better entropy
+  const uuid = randomUUID();
+  const subdomain = `${uuid}.muozez.com`;
 
-  // Spawn detached so the tunnel process isn't accidentally killed when the
-  // parent process performs cleanup or exits. Keep pipes so we can read the
-  // initial output to learn the quick-tunnel public URL.
-  const child = spawn('cloudflared', args, { stdio: ['ignore', 'pipe', 'pipe'], env: childEnv, detached: true });
-  if (prNumber) cloudflaredProcesses.set(prNumber, child);
+  if (prNumber) {
+    // Clean up any existing tunnel for this PR
+    await stopTunnelForPR(prNumber);
+    prSubdomains.set(prNumber, subdomain);
+  }
 
+  // Verify credentials exist
+  const credentialsPath = path.resolve(process.cwd(), 'keys', 'tunnel-credentials.json');
+  if (!fs.existsSync(credentialsPath)) {
+    throw new Error(`Tunnel credentials not found at ${credentialsPath}. Run: cloudflared tunnel create envzilla`);
+  }
+
+  const tunnelName = process.env.CLOUDFLARED_TUNNEL_NAME || 'envzilla';
+  const args = [
+    'tunnel', 'run',
+    '--credentials-file', credentialsPath,
+    '--url', `http://localhost:${actualPort}`,
+    '--hostname', subdomain,
+    '--protocol', process.env.CLOUDFLARED_PROTOCOL || 'http2',
+    '--logfile', `/tmp/cloudflared-pr-${prNumber || 'unknown'}.log`, // Better debugging
+    tunnelName
+  ];
+
+  logger.info({ args, prNumber, subdomain, actualPort }, 'Starting cloudflared with enhanced config');
+
+  const child = spawn('cloudflared', args, {
+    stdio: ['ignore', 'pipe', 'pipe'],
+    env: {
+      ...process.env,
+      // Optimize for faster startup
+      TUNNEL_ORIGIN_CERT: process.env.CLOUDFLARE_ORIGIN_CERT_PATH,
+      TUNNEL_CREDS_FILE: credentialsPath
+    },
+    detached: false
+  });
+
+  const startTime = Date.now();
   let resolved = false;
+  let connectionEstablished = false;
 
   const urlPromise = new Promise<string>((resolve, reject) => {
-    // Give cloudflared a bit more time to establish and print the public URL
-    const timeoutMs = Number(process.env.CLOUDFLARED_STARTUP_TIMEOUT_MS) || 30_000;
+    // Increased timeout for global propagation
+    const timeoutMs = Number(process.env.CLOUDFLARED_STARTUP_TIMEOUT_MS) || 90_000;
     const timeout = setTimeout(() => {
       if (resolved) return;
       resolved = true;
-      // Don't forcibly kill the cloudflared process here. In some environments
-      // cloudflared may take longer to produce the quick-tunnel URL or recover
-      // from transient network issues. Leaving the process running helps with
-      // debugging and may still provide a public URL later. The caller can
-      // explicitly stop the tunnel with `stopTunnelForPR` when appropriate.
-      logger.warn({ pr: prNumber, timeoutMs }, 'Timed out waiting for cloudflared to print public URL — leaving process running for debugging');
-      reject(new Error('Timed out waiting for cloudflared to print public URL'));
+
+      if (connectionEstablished) {
+        logger.info({ pr: prNumber, subdomain, elapsed: Date.now() - startTime }, '⏰ Timeout reached but connection established');
+        resolve(`https://${subdomain}`);
+      } else {
+        logger.error({ pr: prNumber, timeoutMs, subdomain }, '❌ Tunnel startup timeout');
+        try { 
+          child.kill('SIGKILL'); 
+        } catch (killError) {
+          logger.warn({ err: killError, pr: prNumber }, '⚠️ Failed to kill timed out cloudflared process');
+        }
+        if (prNumber) {
+          prSubdomains.delete(prNumber);
+        }
+        reject(new Error(`Tunnel startup timeout after ${timeoutMs}ms for ${subdomain}`));
+      }
     }, timeoutMs);
 
-    const handleChunk = (s: string, stream: 'stdout' | 'stderr') => {
-      if (!s) return;
-      const trimmed = s.trim();
-      logger.info({ pr: prNumber, stream, chunk: trimmed, protocol }, `cloudflared ${stream}`);
-      if (resolved) return;
-      const url = extractUrlFromChunk(trimmed);
-      if (url) {
-        // Some cloudflared messages contain non-tunnel links (eg. website-terms).
-        // Ignore those and keep waiting for the actual quick-tunnel URL.
-        if (isIgnorableCloudflareUrl(url)) {
-          logger.info({ pr: prNumber, url }, 'Ignoring non-tunnel cloudflared URL');
-          return;
+    const handleOutput = (data: Buffer, stream: 'stdout' | 'stderr') => {
+      const lines = data.toString().split('\n').filter(line => line.trim());
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+
+        logger.debug({ pr: prNumber, stream, line: trimmed, subdomain }, `cloudflared ${stream}`);
+
+        // Enhanced connection detection
+        if (trimmed.includes('Connection') && (trimmed.includes('registered') || trimmed.includes('established'))) {
+          connectionEstablished = true;
+          logger.info({ pr: prNumber, subdomain, elapsed: Date.now() - startTime }, '🔗 Cloudflared connection registered');
         }
 
-        resolved = true;
-        clearTimeout(timeout);
-        resolve(url);
+        if (trimmed.includes('serving tunnel') ||
+            trimmed.includes('tunnel connected') ||
+            (trimmed.includes('tunnel') && trimmed.includes('started'))) {
+          connectionEstablished = true;
+          if (!resolved) {
+            resolved = true;
+            clearTimeout(timeout);
+            resolve(`https://${subdomain}`);
+          }
+        }
+
+        // Enhanced error detection
+        if (/error.*tunnel|failed.*establish|panic|fatal|unable to connect/i.test(trimmed) && !resolved) {
+          resolved = true;
+          clearTimeout(timeout);
+          try { 
+            child.kill('SIGKILL'); 
+          } catch (killError) {
+            logger.warn({ err: killError, pr: prNumber }, '⚠️ Failed to kill cloudflared process on error');
+          }
+          if (prNumber) prSubdomains.delete(prNumber);
+          reject(new Error(`Cloudflared error: ${trimmed}`));
+        }
+
+        // DNS propagation warnings
+        if (/NXDOMAIN|Name or service not known/i.test(trimmed)) {
+          logger.warn({ pr: prNumber, subdomain }, '🌐 DNS propagation delay detected - this is normal for new subdomains');
+        }
       }
     };
 
-    child.stdout?.on('data', (b) => handleChunk(b.toString(), 'stdout'));
-    child.stderr?.on('data', (b) => {
-      const s = b.toString();
-      // Try to extract a URL from stderr as well (cloudflared sometimes logs the
-      // quick-tunnel URL to stderr).
-      handleChunk(s, 'stderr');
+    child.stdout?.on('data', (data) => handleOutput(data, 'stdout'));
+    child.stderr?.on('data', (data) => handleOutput(data, 'stderr'));
 
-      // Provide a clearer error message for the common QUIC/UDP buffer issue.
-      if (/failed to sufficiently increase receive buffer size/i.test(s)) {
-        // include a hint rather than immediately rejecting so caller can decide
-        logger.warn({ pr: prNumber }, 'cloudflared reported UDP buffer size issue — consider increasing net.core.rmem_max / rmem_default on the host or switching to HTTP/2 protocol');
+    child.on('exit', (code, signal) => {
+      const elapsed = Date.now() - startTime;
+      logger.info({ pr: prNumber, code, signal, subdomain, elapsed }, 'Cloudflared process exited');
+
+      if (prNumber) {
+        const tunnelProcess = cloudflaredProcesses.get(prNumber);
+        if (tunnelProcess?.process === child) {
+          cloudflaredProcesses.delete(prNumber);
+          prSubdomains.delete(prNumber);
+        }
       }
 
-      // Only treat true fatal errors as failures. Cloudflared prints many non-fatal
-      // informational messages to stderr, so be conservative here.
-      if (/exited unexpectedly|exit|panic|fatal|unable to|failed to initialize/i.test(s) && !resolved) {
+      if (!resolved) {
         resolved = true;
         clearTimeout(timeout);
-        try { child.kill(); } catch {
-          // Ignore kill errors
-        }
-        if (prNumber) cloudflaredProcesses.delete(prNumber);
-        // Add the original stderr output to the error for debugging.
-        const hint = /receive buffer size/i.test(s) ? ' (UDP buffer issue detected; try --protocol http2 or increase host UDP buffer limits)' : '';
-        reject(new Error(`cloudflared error: ${s.trim()}${hint}`));
+        reject(new Error(`Cloudflared exited unexpectedly (code=${code}, signal=${signal})`));
       }
     });
 
-    child.on('exit', (code, signal) => {
-      logger.info({ pr: prNumber, code, signal }, 'cloudflared process exited');
-      if (resolved) {
-        // If the tunnel had been established earlier, ensure we no longer track it.
-        if (prNumber && cloudflaredProcesses.get(prNumber) === child) cloudflaredProcesses.delete(prNumber);
-        return;
+    child.on('error', (error) => {
+      logger.error({ err: error, pr: prNumber, subdomain }, 'Cloudflared process error');
+      if (!resolved) {
+        resolved = true;
+        clearTimeout(timeout);
+        if (prNumber) prSubdomains.delete(prNumber);
+        reject(error);
       }
-      resolved = true;
-      clearTimeout(timeout);
-      if (prNumber) cloudflaredProcesses.delete(prNumber);
-      reject(new Error(`cloudflared exited unexpectedly (code=${code} signal=${signal})`));
     });
   });
 
   const publicUrl = await urlPromise;
-  logger.info({ publicUrl, port, prNumber }, '✅ cloudflared tunnel established');
 
-  // Detach the child from the parent's event loop so the parent can exit or
-  // continue without accidentally killing the tunnel. The child was spawned
-  // with `detached: true` above; calling unref() allows the parent to exit
-  // independently while leaving the child running.
-  try { child.unref?.(); } catch {
-    // ignore if unref not supported
+  // Store enhanced process info
+  if (prNumber) {
+    cloudflaredProcesses.set(prNumber, {
+      process: child,
+      subdomain,
+      publicUrl,
+      startTime,
+      lastHealthCheck: Date.now()
+    });
   }
 
-  return { publicUrl, proto: publicUrl.startsWith('https') ? 'https' : 'http', port };
+  const elapsed = Date.now() - startTime;
+  logger.info({
+    publicUrl,
+    actualPort,
+    containerPort,
+    prNumber,
+    subdomain,
+    elapsed
+  }, '✅ Enhanced cloudflared tunnel established');
+
+  return {
+    publicUrl,
+    process: child,
+    subdomain,
+    actualPort,
+    tunnelId: uuid
+  };
 }
 
-export async function stopTunnelForPR(prNumber: number): Promise<void> {
-  const child = cloudflaredProcesses.get(prNumber);
-  if (!child) return;
-  try {
-    // If the child was spawned detached, it should have its own process group
-    // on POSIX systems. Kill the process group to ensure any subprocesses are
-    // also terminated. Fall back to child.kill() on platforms that don't
-    // support negative PIDs (Windows).
-    if (child.pid && process.platform !== 'win32') {
-      try { process.kill(-child.pid); } catch (_e) { child.kill(); }
-    } else {
-      child.kill();
-    }
-    cloudflaredProcesses.delete(prNumber);
-    logger.info({ pr: prNumber }, '🛑 cloudflared process killed for PR');
-  } catch (err: unknown) {
-    logger.warn({ err, pr: prNumber }, 'Failed to kill cloudflared process for PR');
-  }
-}
+/**
+ * Enhanced verification with adaptive timeouts based on global conditions
+ */
+export async function verifyTunnelWithRetry(
+  url: string,
+  maxAttempts: number = 15, // Increased for global propagation
+  baseDelayMs: number = 3000 // Longer base delay
+): Promise<{ verified: boolean; attempts: number; lastError?: string; propagationTime?: number }> {
+  const startTime = Date.now();
+  logger.info({ url, maxAttempts, baseDelayMs }, '🔍 Starting adaptive tunnel verification');
 
-export async function stopAllTunnels(): Promise<void> {
-  for (const [pr, child] of cloudflaredProcesses.entries()) {
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
-      if (child.pid && process.platform !== 'win32') {
-        try { process.kill(-child.pid); } catch { child.kill(); }
-      } else {
-        child.kill();
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 15000); // Longer timeout per request
+
+      const response = await fetch(url, {
+        signal: controller.signal,
+        headers: {
+          'User-Agent': 'Envzilla-Tunnel-Verification/2.0',
+          'Cache-Control': 'no-cache',
+          'Accept': 'text/html,application/json,*/*'
+        }
+      });
+
+      clearTimeout(timeoutId);
+
+      if (response.ok) {
+        const propagationTime = Date.now() - startTime;
+        logger.info({
+          url,
+          attempt,
+          status: response.status,
+          propagationTime,
+          propagationSeconds: Math.round(propagationTime / 1000)
+        }, '✅ Tunnel verification successful');
+        return { verified: true, attempts: attempt, propagationTime };
       }
-    } catch {
-      // Ignore kill errors
+
+      logger.warn({ url, attempt, status: response.status }, '⚠️ Tunnel responded but not OK');
+
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+
+      // Different handling for different error types
+      if (errorMessage.includes('NXDOMAIN') || errorMessage.includes('Name or service not known')) {
+        logger.info({ url, attempt, error: 'DNS_PROPAGATION' }, '🌐 DNS still propagating globally');
+      } else if (errorMessage.includes('ECONNREFUSED') || errorMessage.includes('ENOTFOUND')) {
+        logger.info({ url, attempt, error: 'CONNECTION_REFUSED' }, '🔄 Service not yet available');
+      } else {
+        logger.warn({ url, attempt, error: errorMessage }, '❌ Tunnel verification attempt failed');
+      }
+
+      if (attempt === maxAttempts) {
+        const totalTime = Date.now() - startTime;
+        return {
+          verified: false,
+          attempts: attempt,
+          lastError: errorMessage,
+          propagationTime: totalTime
+        };
+      }
     }
-    cloudflaredProcesses.delete(pr);
+
+    // Adaptive backoff with jitter - longer delays for DNS propagation
+    const baseDelay = baseDelayMs * Math.pow(1.3, attempt - 1);
+    const maxDelay = 45000; // Max 45 seconds between attempts
+    const delay = Math.min(baseDelay, maxDelay);
+    const jitter = Math.random() * 2000; // Up to 2 seconds jitter
+
+    logger.debug({
+      attempt,
+      delay: delay + jitter,
+      nextAttemptIn: Math.round((delay + jitter) / 1000) + 's'
+    }, '⏳ Waiting before next verification attempt');
+
+    await new Promise(resolve => setTimeout(resolve, delay + jitter));
   }
-  logger.info({}, '🛑 All cloudflared processes killed');
+
+  const totalTime = Date.now() - startTime;
+  return { verified: false, attempts: maxAttempts, propagationTime: totalTime };
+}
+
+/**
+ * Enhanced tunnel stop with async cleanup
+ */
+export async function stopTunnelForPR(prNumber: number): Promise<void> {
+  const tunnelProcess = cloudflaredProcesses.get(prNumber);
+  const subdomain = prSubdomains.get(prNumber);
+
+  if (!tunnelProcess && !subdomain) {
+    logger.debug({ pr: prNumber }, 'No tunnel found for PR, skipping cleanup');
+    return;
+  }
+
+  logger.info({ pr: prNumber, subdomain }, '🛑 Stopping tunnel with enhanced cleanup');
+
+  if (tunnelProcess) {
+    try {
+      // Graceful shutdown with timeout
+      tunnelProcess.process.kill('SIGTERM');
+
+      const gracefulTimeout = new Promise(resolve => setTimeout(resolve, 5000));
+      const processExit = new Promise(resolve => {
+        tunnelProcess.process.on('exit', resolve);
+      });
+
+      await Promise.race([gracefulTimeout, processExit]);
+
+      // Force kill if still running
+      if (!tunnelProcess.process.killed) {
+        tunnelProcess.process.kill('SIGKILL');
+        await new Promise(resolve => setTimeout(resolve, 1000));
+      }
+
+      const runTime = Date.now() - tunnelProcess.startTime;
+      logger.info({
+        pr: prNumber,
+        subdomain,
+        runTimeSeconds: Math.round(runTime / 1000)
+      }, '✅ Tunnel process stopped');
+
+    } catch (error) {
+      logger.warn({ err: error, pr: prNumber }, '⚠️ Error stopping tunnel process');
+    }
+
+    cloudflaredProcesses.delete(prNumber);
+  }
+
+  if (subdomain) {
+    prSubdomains.delete(prNumber);
+    portMappingCache.clear(); // Clear cache for this cleanup
+    logger.info({ pr: prNumber, subdomain }, '🧹 Tunnel metadata cleaned up');
+  }
+}
+
+/**
+ * Get tunnel health status
+ */
+export function getTunnelStatus(prNumber: number): {
+  exists: boolean;
+  subdomain?: string;
+  publicUrl?: string;
+  uptime?: number;
+  lastHealthCheck?: number;
+} {
+  const tunnelProcess = cloudflaredProcesses.get(prNumber);
+  const subdomain = prSubdomains.get(prNumber);
+
+  if (!tunnelProcess && !subdomain) {
+    return { exists: false };
+  }
+
+  return {
+    exists: true,
+    subdomain,
+    publicUrl: tunnelProcess?.publicUrl,
+    uptime: tunnelProcess ? Date.now() - tunnelProcess.startTime : undefined,
+    lastHealthCheck: tunnelProcess?.lastHealthCheck
+  };
+}
+
+export function getSubdomainForPR(prNumber: number): string | undefined {
+  return prSubdomains.get(prNumber);
+}
+
+export function getAllActiveTunnels(): Array<{
+  prNumber: number;
+  subdomain: string;
+  publicUrl: string;
+  uptime: number;
+}> {
+  return Array.from(cloudflaredProcesses.entries()).map(([prNumber, tunnelProcess]) => ({
+    prNumber,
+    subdomain: tunnelProcess.subdomain,
+    publicUrl: tunnelProcess.publicUrl,
+    uptime: Date.now() - tunnelProcess.startTime
+  }));
+}
+
+// Legacy compatibility functions
+export async function stopAllTunnels(): Promise<void> {
+  logger.info({}, '🛑 Stopping all tunnels via enhanced cleanup');
+  for (const prNumber of cloudflaredProcesses.keys()) {
+    await stopTunnelForPR(prNumber);
+  }
 }
 

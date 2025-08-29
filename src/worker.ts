@@ -8,10 +8,11 @@ import {
     cleanupTempDir,
     BuildResult 
 } from './lib/buildContainer.js';
-import { startHttpTunnel, stopTunnelForPR } from './lib/cloudflaredManager.js';
+import { startHttpTunnel, verifyTunnelWithRetry, TunnelInfo } from './lib/cloudflaredManager.js';
 import { tunnelHealthMonitor } from './lib/tunnelHealthMonitor.js';
 import { postPRComment } from './lib/githubClient.js';
 import { getInstallationAccessToken } from './lib/githubAuth.js';
+import { cleanupQueue } from './lib/cleanupQueue.js';
 import { 
     destroyContainer, 
     destroyByPRNumber,
@@ -20,8 +21,19 @@ import {
 
 type RunResult = { code: number; stdout: string; stderr: string };
 
+interface TunnelVerificationResult {
+  verified: boolean;
+  attempts: number;
+  lastError?: string;
+  propagationTime?: number;
+}
+
 interface BuildForPRResult extends RunResult {
     buildResult?: BuildResult;
+    publicUrl?: string;
+    subdomain?: string;
+    verified?: boolean;
+    propagationTime?: number;
 }
 
 interface DestroyForPRResult extends RunResult {
@@ -138,112 +150,36 @@ export async function buildForPR(
         // Format output to match expected format
         // Start an external tunnel for the container port so it is reachable from GitHub
         let publicUrl = localUrl;
+        let tunnelInfo: TunnelInfo | undefined;
+        let enhancedVerificationResult: TunnelVerificationResult = { verified: false, attempts: 0 };
+        
         try {
-            const name = `envzilla-pr-${prNumber}`;
-            const tunnel = await startHttpTunnel(buildResult.hostPort, name, undefined, prNumber);
-            publicUrl = tunnel.publicUrl;
-
-            // Smart tunnel verification with progressive backoff and DNS propagation awareness
-            const urlConfig = {
-                // Initial quick checks for immediate availability
-                quickAttempts: Number(process.env.PREVIEW_URL_QUICK_ATTEMPTS) || 2,
-                quickDelayMs: Number(process.env.PREVIEW_URL_QUICK_DELAY_MS) || 500,
-                
-                // Extended checks with exponential backoff for DNS propagation
-                extendedAttempts: Number(process.env.PREVIEW_URL_EXTENDED_ATTEMPTS) || 6,
-                baseDelayMs: Number(process.env.PREVIEW_URL_BASE_DELAY_MS) || 2000,
-                maxDelayMs: Number(process.env.PREVIEW_URL_MAX_DELAY_MS) || 15000,
-                
-                requestTimeoutMs: Number(process.env.PREVIEW_URL_REQUEST_TIMEOUT_MS) || 8000
-            };
+            const containerName = `preview-${prNumber}`;
             
-            async function smartTunnelVerification(url: string): Promise<{ verified: boolean; lastError?: string }> {
-                logger.info({ pr: prNumber, url }, '🔍 Starting smart tunnel verification...');
-                
-                // Phase 1: Quick checks for immediate availability
-                logger.debug({ pr: prNumber, attempts: urlConfig.quickAttempts }, 'Phase 1: Quick availability checks');
-                for (let i = 0; i < urlConfig.quickAttempts; i++) {
-                    try {
-                        const controller = new AbortController();
-                        const id = setTimeout(() => controller.abort(), urlConfig.requestTimeoutMs);
-                        const res = await fetch(url, { 
-                            method: 'HEAD', // Use HEAD for faster checks
-                            signal: controller.signal,
-                            headers: { 'User-Agent': 'EnvZilla-TunnelVerifier/1.0' }
-                        });
-                        clearTimeout(id);
-                        
-                        if (res && res.ok) {
-                            logger.info({ pr: prNumber, url, phase: 1, attempt: i + 1 }, '✅ Tunnel verified immediately');
-                            return { verified: true };
-                        }
-                        
-                        logger.debug({ pr: prNumber, status: res?.status, attempt: i + 1 }, 'Quick check failed, continuing...');
-                    } catch (error: unknown) {
-                        logger.debug({ pr: prNumber, attempt: i + 1, error: error instanceof Error ? error.message : String(error) }, 'Quick check error, continuing...');
-                    }
-                    
-                    if (i < urlConfig.quickAttempts - 1) {
-                        await new Promise(r => setTimeout(r, urlConfig.quickDelayMs));
-                    }
-                }
-                
-                // Phase 2: Extended checks with exponential backoff for DNS propagation
-                logger.debug({ pr: prNumber, attempts: urlConfig.extendedAttempts }, 'Phase 2: Extended DNS propagation checks');
-                let lastError = '';
-                
-                for (let i = 0; i < urlConfig.extendedAttempts; i++) {
-                    const delay = Math.min(
-                        urlConfig.baseDelayMs * Math.pow(1.5, i), // Exponential backoff
-                        urlConfig.maxDelayMs
-                    );
-                    
-                    logger.debug({ pr: prNumber, attempt: i + 1, delayMs: delay }, 'Extended verification attempt');
-                    
-                    try {
-                        const controller = new AbortController();
-                        const id = setTimeout(() => controller.abort(), urlConfig.requestTimeoutMs);
-                        const res = await fetch(url, { 
-                            method: 'GET',
-                            signal: controller.signal,
-                            headers: { 'User-Agent': 'EnvZilla-TunnelVerifier/1.0' }
-                        });
-                        clearTimeout(id);
-                        
-                        if (res && res.ok) {
-                            logger.info({ pr: prNumber, url, phase: 2, attempt: i + 1, totalTime: `${(delay * i) / 1000}s` }, '✅ Tunnel verified after propagation');
-                            return { verified: true };
-                        }
-                        
-                        lastError = `HTTP ${res?.status || 'unknown'}`;
-                        logger.debug({ pr: prNumber, status: res?.status, attempt: i + 1 }, 'Extended check failed, retrying with backoff...');
-                        
-                    } catch (error: unknown) {
-                        lastError = error instanceof Error ? error.message : String(error);
-                        logger.debug({ pr: prNumber, attempt: i + 1, error: lastError }, 'Extended check error, retrying with backoff...');
-                    }
-                    
-                    if (i < urlConfig.extendedAttempts - 1) {
-                        await new Promise(r => setTimeout(r, delay));
-                    }
-                }
-                
-                return { verified: false, lastError };
-            }
-
-            // Run smart verification but don't block deployment on failure
-            const verificationResult = await smartTunnelVerification(publicUrl);
+            // Enhanced tunnel creation with optimized port detection
+            tunnelInfo = await startHttpTunnel(
+                buildResult.hostPort,
+                containerName,
+                prNumber
+            );
             
-            if (verificationResult.verified) {
-                logger.info({ pr: prNumber, publicUrl }, '✅ Tunnel verification completed successfully');
-            } else {
-                // Log warning but continue - tunnel might still work for users
-                logger.warn({ 
-                    pr: prNumber, 
-                    publicUrl, 
-                    lastError: verificationResult.lastError 
-                }, '⚠️ Tunnel verification incomplete - tunnel may still be propagating globally');
-            }
+            publicUrl = tunnelInfo.publicUrl;
+
+            logger.info({ 
+                pr: prNumber, 
+                publicUrl, 
+                subdomain: tunnelInfo.subdomain,
+                containerPort: buildResult.hostPort,
+                actualPort: tunnelInfo.actualPort,
+                tunnelId: tunnelInfo.tunnelId
+            }, '🌐 Enhanced tunnel created');
+
+            // Enhanced verification with adaptive propagation handling
+            enhancedVerificationResult = await verifyTunnelWithRetry(
+                publicUrl,
+                Number(process.env.TUNNEL_VERIFICATION_ATTEMPTS) || 15,
+                Number(process.env.TUNNEL_VERIFICATION_BASE_DELAY) || 3000
+            );
 
             // Start background health monitoring for the tunnel
             tunnelHealthMonitor.startMonitoring(publicUrl, prNumber);
@@ -284,7 +220,7 @@ export async function buildForPR(
                 const header = author ? `@${author} 👋` : '👀 Envzilla is peeking at your preview environment 👀';
                 
                 // Check if tunnel was successfully verified
-                const tunnelStatus = verificationResult.verified 
+                const tunnelStatus = enhancedVerificationResult.verified 
                     ? '✅ Tunnel verified and ready'
                     : '🔄 Tunnel created (may still be propagating globally)';
                 
@@ -293,11 +229,13 @@ export async function buildForPR(
                     '🔥 The Beast Lives! 🔥',
                     '',
                     `🌐 **Preview:** ${safeUrl}`,
+                    `🏷️ **Subdomain:** \`${tunnelInfo.subdomain}\``,
                     `📦 **Container:** ${buildResult.containerId}`,
-                    `🔌 **Port:** ${buildResult.hostPort}`,
+                    `🔌 **Port Mapping:** ${buildResult.hostPort}`,
+                    `🆔 **Tunnel ID:** \`${tunnelInfo.tunnelId}\``,
                     `🛡️ **Status:** ${tunnelStatus}`,
                     '',
-                    verificationResult.verified 
+                    enhancedVerificationResult.verified 
                         ? '🎉 Your preview environment is ready to test!'
                         : '⏳ If the link doesn\'t work immediately, wait 30-60 seconds for global DNS propagation.',
                     '',
@@ -309,7 +247,7 @@ export async function buildForPR(
                 // Post comment with retry logic
                 try { 
                     await postPRComment(ephemeralToken, repoFullName, prNumber, body); 
-                    logger.info({ pr: prNumber, verified: verificationResult.verified }, '💬 Posted PR comment with tunnel status');
+                    logger.info({ pr: prNumber, verified: enhancedVerificationResult.verified }, '💬 Posted PR comment with tunnel status');
                 } catch (err: unknown) { 
                     logger.warn({ err, pr: prNumber }, 'Failed to post PR comment'); 
                 }
@@ -338,7 +276,11 @@ export async function buildForPR(
             code: 0,
             stdout,
             stderr: '',
-            buildResult
+            buildResult,
+            publicUrl,
+            subdomain: tunnelInfo?.subdomain,
+            verified: enhancedVerificationResult?.verified,
+            propagationTime: enhancedVerificationResult?.propagationTime
         };
         
     } else {
@@ -403,20 +345,10 @@ export async function destroyForPR(containerId: string, prNumber?: number): Prom
                 imageDestroyed: destroyResult.imageDestroyed
             }, '✅ Integrated destroy completed successfully');
             
-            // Attempt to stop any cloudflared tunnel tied to this PR
-            try { 
-                if (prNumber) {
-                    await stopTunnelForPR(prNumber);
-                    // Stop health monitoring for this PR's tunnel
-                    const healthStatus = tunnelHealthMonitor.getAllHealthStatus();
-                    const prTunnels = healthStatus.filter(h => h.url.includes(`pr-${prNumber}`) || h.url.includes(`envzilla-pr-${prNumber}`));
-                    prTunnels.forEach(tunnel => {
-                        tunnelHealthMonitor.stopMonitoring(tunnel.url);
-                        logger.info({ pr: prNumber, url: tunnel.url }, '🔍 Stopped tunnel health monitoring');
-                    });
-                }
-            } catch (err: unknown) { 
-                logger.warn({ err, pr: prNumber }, 'Failed to stop tunnel or health monitoring for PR'); 
+            // Use async cleanup queue for better performance
+            if (prNumber) {
+                cleanupQueue.addCleanupTask(prNumber, 'full');
+                logger.info({ pr: prNumber }, '�️ Added to async cleanup queue');
             }
         }
         
