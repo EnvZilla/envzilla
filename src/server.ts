@@ -11,10 +11,12 @@ import logger from './utils/logger.js';
 import { verifySignature } from './middlewares/verifySignature.js';
 import { dispatchWebhookEvent, getDeploymentInfo, getAllDeployments, cleanupStaleDeployments } from './middlewares/dispatcherServer.js';
 import { getQueueStats, getJobStatus } from './lib/jobQueue.js';
+import { tunnelHealthMonitor } from './lib/tunnelHealthMonitor.js';
 import { DeploymentManager } from './lib/deploymentManager.js';
 import { performHealthCheck, logHealthStatus } from './utils/healthCheck.js';
 
 const app: Express = express();
+const HOST: string = process.env.HOST || '192.168.1.1';
 const PORT: number = Number(process.env.PORT) || 3000;
 
 // Determine whether to trust proxy headers (needed for correct client IP detection
@@ -66,8 +68,21 @@ const limiter = rateLimit({
 });
 app.use(limiter);
 
+// Serve static files (dashboard, etc.)
+app.use(express.static('public'));
+
 app.get('/', (req: Request, res: Response) => {
-	res.json({ status: 'ok', message: 'EnvZilla API server' });
+	res.json({ 
+		status: 'ok', 
+		message: 'EnvZilla API server',
+		endpoints: {
+			health: '/health',
+			deployments: '/deployments',
+			adminQueue: '/admin/queue/stats',
+			adminTunnels: '/admin/tunnels/health',
+			tunnelDashboard: '/tunnel-health.html'
+		}
+	});
 });
 
 // Health check endpoint
@@ -193,6 +208,56 @@ app.get('/admin/jobs/:jobId', async (req: Request, res: Response) => {
 	}
 });
 
+// Get tunnel health status for all monitored tunnels
+app.get('/admin/tunnels/health', async (req: Request, res: Response) => {
+	try {
+		const allHealth = tunnelHealthMonitor.getAllHealthStatus();
+		const summary = {
+			totalTunnels: allHealth.length,
+			healthyTunnels: allHealth.filter(h => h.isHealthy).length,
+			unhealthyTunnels: allHealth.filter(h => !h.isHealthy).length,
+			tunnels: allHealth.map(health => ({
+				url: health.url,
+				isHealthy: health.isHealthy,
+				lastChecked: health.lastChecked,
+				consecutiveFailures: health.consecutiveFailures,
+				lastError: health.lastError,
+				responseTime: health.responseTime
+			}))
+		};
+		
+		res.json(summary);
+	} catch (error: unknown) {
+		logger.error({ error: error instanceof Error ? error.message : String(error) }, 'Failed to get tunnel health status');
+		res.status(500).json({ error: 'Internal server error' });
+	}
+});
+
+// Get health status for a specific tunnel
+app.get('/admin/tunnels/health/:prNumber', async (req: Request, res: Response) => {
+	const prNumber = req.params.prNumber;
+	
+	try {
+		const allHealth = tunnelHealthMonitor.getAllHealthStatus();
+		const prTunnels = allHealth.filter(h => 
+			h.url.includes(`pr-${prNumber}`) || 
+			h.url.includes(`envzilla-pr-${prNumber}`)
+		);
+		
+		if (prTunnels.length === 0) {
+			return res.status(404).json({ error: 'No tunnels found for this PR' });
+		}
+		
+		res.json({
+			prNumber: parseInt(prNumber),
+			tunnels: prTunnels
+		});
+	} catch (error: unknown) {
+		logger.error({ prNumber, error: error instanceof Error ? error.message : String(error) }, 'Failed to get PR tunnel health status');
+		res.status(500).json({ error: 'Internal server error' });
+	}
+});
+
 // Main GitHub webhook endpoint - now uses the comprehensive event dispatcher
 app.post(
 	'/webhooks/github',
@@ -223,8 +288,8 @@ app.use((err: Error & { status?: number }, _req: Request, res: Response, _next: 
 	res.status(status).json({ error: message });
 });
 
-app.listen(PORT, () => {
-	logger.info({ port: PORT }, `EnvZilla sample app roaring on port http://localhost:${PORT} — press CTRL+C to calm the beast`);
+app.listen(PORT, HOST, () => {
+	logger.info({ port: PORT, host: HOST }, `EnvZilla sample app roaring on http://${HOST}:${PORT} — press CTRL+C to calm the beast`);
 	
 	// Start background cleanup job - runs every 6 hours
 	const cleanupInterval = setInterval(async () => {

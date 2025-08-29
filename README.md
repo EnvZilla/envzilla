@@ -176,9 +176,16 @@ EnvZilla can be tamed through environment variables:
 | `SERVICE_READY_ATTEMPTS` | Attempts to check if service is ready before tunnel | `15` |
 | `SERVICE_READY_DELAY_MS` | Delay between service readiness attempts | `2000` (2s) |
 | `SERVICE_READY_REQUEST_TIMEOUT_MS` | Timeout per service readiness request | `5000` (5s) |
-| `PREVIEW_URL_ATTEMPTS` | Number of attempts to verify tunnel connectivity | `5` |
-| `PREVIEW_URL_DELAY_MS` | Delay between tunnel verification attempts | `1000` (1s) |
-| `PREVIEW_URL_REQUEST_TIMEOUT_MS` | Timeout per tunnel verification request | `5000` (5s) |
+
+### Smart Tunnel Verification Configuration
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `PREVIEW_URL_QUICK_ATTEMPTS` | Quick immediate availability checks | `2` |
+| `PREVIEW_URL_QUICK_DELAY_MS` | Delay between quick checks | `500` (0.5s) |
+| `PREVIEW_URL_EXTENDED_ATTEMPTS` | Extended checks with exponential backoff | `5` |
+| `PREVIEW_URL_BASE_DELAY_MS` | Base delay for exponential backoff | `2000` (2s) |
+| `PREVIEW_URL_MAX_DELAY_MS` | Maximum delay between attempts | `12000` (12s) |
+| `PREVIEW_URL_REQUEST_TIMEOUT_MS` | Timeout per tunnel verification request | `8000` (8s) |
 
 ### Cloudflared Tunnel Configuration
 | Variable | Description | Default |
@@ -229,7 +236,8 @@ EnvZilla can be tamed through environment variables:
 | **Jobs stuck in queue** | **Check if worker process is running and can access Redis** |
 | **Deployments not updating** | **Verify Redis connectivity and check worker logs** |
 | **Tunnel shows errors initially** | **This is normal - tunnel waits for service to be ready before starting** |
-| **Preview URL takes time to load** | **Service readiness checks ensure tunnel starts only when app is ready** |
+| **Preview URL takes time to load** | **Uses smart verification with exponential backoff for DNS propagation** |
+| **Tunnel verification warnings** | **Background monitoring continues - check `/admin/tunnels/health` endpoint** |
 
 ### Monitoring
 
@@ -240,6 +248,12 @@ curl http://localhost:3000/health
 
 # Queue statistics  
 curl http://localhost:3000/admin/queue/stats
+
+# Tunnel health monitoring (all tunnels)
+curl http://localhost:3000/admin/tunnels/health
+
+# Specific PR tunnel health
+curl http://localhost:3000/admin/tunnels/health/36
 ```
 
 ## 🌟 Contributing
