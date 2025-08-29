@@ -49,6 +49,7 @@ export interface GitHubWebhookPayload {
   installation?: {
     id: number;
   };
+  [key: string]: unknown;
 }
 
 export interface DeploymentInfo {
