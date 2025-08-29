@@ -10,6 +10,7 @@ WORKDIR /app
 
 # Copy the cert.pem file to the container
 COPY keys/cert.pem /app/keys/cert.pem
+COPY keys/envzilla.2025-08-24.private-key.pem /app/keys/envzilla.2025-08-24.private-key.pem
 
 COPY package*.json ./
 RUN npm ci

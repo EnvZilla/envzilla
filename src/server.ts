@@ -16,7 +16,7 @@ import { DeploymentManager } from './lib/deploymentManager.js';
 import { performHealthCheck, logHealthStatus } from './utils/healthCheck.js';
 
 const app: Express = express();
-const HOST: string = process.env.HOST || '192.168.1.1';
+const HOST: string = process.env.HOST || 'localhost';
 const PORT: number = Number(process.env.PORT) || 3000;
 
 // Determine whether to trust proxy headers (needed for correct client IP detection

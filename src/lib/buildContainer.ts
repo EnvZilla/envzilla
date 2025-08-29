@@ -295,6 +295,7 @@ async function runContainer(imageName: string, hostPort: number, prNumber: numbe
         '-d',
         '--name', containerName,
         '-p', mapping,
+        '--add-host=host.docker.internal:host-gateway',
         imageName
     ], { timeoutMs: DOCKER_CONFIG.runTimeoutMs });
 
