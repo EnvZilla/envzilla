@@ -1,16 +1,13 @@
 import { Request, Response, NextFunction } from 'express';
 import crypto from 'crypto';
 import logger from '../utils/logger.js';
-import * as worker from '../worker.js';
+import { addBuildJob, addDestroyJob } from '../lib/jobQueue.js';
+import { DeploymentManager } from '../lib/deploymentManager.js';
 import { 
   GitHubWebhookPayload, 
   DeploymentInfo, 
   EncryptedData
 } from '../types/webhook.js';
-
-// In-memory deployment tracking
-// In production, this should be moved to a persistent store like Redis
-const deployments = new Map<number, DeploymentInfo>();
 
 /**
  * Encrypts sensitive data using AES-256-GCM
@@ -168,20 +165,22 @@ async function handleCreateOrUpdate(
   encryptionKey: string
 ) {
   try {
-    // Update deployment status
-    const existingDeployment = deployments.get(prNumber);
-    deployments.set(prNumber, {
+    // Update deployment status in Redis
+    const existingDeployment = await DeploymentManager.getDeployment(prNumber);
+    const newDeployment: DeploymentInfo = {
       ...existingDeployment,
-      status: 'building',
-      createdAt: Date.now(),
+      status: 'queued',
+      createdAt: existingDeployment?.createdAt || Date.now(),
       buildStartedAt: Date.now(),
       branch: payload.pull_request?.head.ref,
       commitSha: payload.pull_request?.head.sha,
       title: payload.pull_request?.title,
       author: payload.pull_request?.user.login
-    });
+    };
 
-    logger.info({ pr: prNumber }, '🏗️ Starting build process for PR');
+    await DeploymentManager.setDeployment(prNumber, newDeployment);
+
+    logger.info({ pr: prNumber }, '📋 Queuing build job for PR');
 
     // Decrypt sensitive data for processing
     const decryptedData = encryptedSensitiveData.map(data => 
@@ -193,78 +192,46 @@ async function handleCreateOrUpdate(
       decryptedDataCount: decryptedData.length 
     }, '🔓 Decrypted sensitive data for build process');
 
-    // Trigger build process asynchronously
+    // Prepare job data
     const branch = payload.pull_request?.head.ref;
     const repoURL = payload.pull_request?.head.repo.clone_url;
+    const repoFullName = payload.pull_request?.head?.repo?.full_name || payload.repository?.full_name;
+    const author = payload.pull_request?.user?.login;
+    const installationId = payload.installation?.id || payload.sender?.id || undefined;
 
-    // DEBUG: log before invoking worker
-    logger.info({ pr: prNumber, branch, repoURL }, '▶️ Invoking worker.buildForPR');
+    // Add build job to queue
+    const job = await addBuildJob({
+      prNumber,
+      branch,
+      repoURL,
+      repoFullName,
+      author,
+      installationId,
+      webhookPayload: payload
+    });
 
-  // Extract repository full name for accurate PR comments (owner/repo)
-  const repoFullName = payload.pull_request?.head?.repo?.full_name || payload.repository?.full_name;
-  const author = payload.pull_request?.user?.login;
-  const installationId = payload.installation?.id || payload.sender?.id || undefined;
+    // Update deployment status to building
+    await DeploymentManager.updateDeploymentStatus(prNumber, 'building');
 
-  worker.buildForPR(prNumber, branch, repoURL, repoFullName, author, installationId)
-      .then(result => {
-        logger.info({ pr: prNumber, result }, '🔔 buildForPR finished'); // <-- daha ayrıntılı log
-        if (result.code === 0) {
-          let containerId: string | undefined;
-          let hostPort: number | undefined;
-
-          // Try to parse JSON output from integrated approach
-          try {
-            const buildOutput = JSON.parse(result.stdout);
-            containerId = buildOutput.containerId;
-            hostPort = buildOutput.hostPort;
-          } catch {
-            // Fallback to legacy parsing for build.ts script output
-            const stdout = result.stdout || '';
-            const containerIdMatch = stdout.match(/Container started.*containerId:\s*"([a-f0-9]{12,64})"/i);
-            const portMatch = stdout.match(/hostPort:\s*(\d+)/i);
-            
-            containerId = containerIdMatch ? containerIdMatch[1] : undefined;
-            hostPort = portMatch ? Number(portMatch[1]) : undefined;
-          }
-
-          if (containerId && hostPort) {
-            deployments.set(prNumber, {
-              containerId,
-              hostPort,
-              status: 'running',
-              createdAt: Date.now(),
-              buildStartedAt: deployments.get(prNumber)?.buildStartedAt || Date.now(),
-              buildCompletedAt: Date.now(),
-              branch: payload.pull_request?.head.ref,
-              commitSha: payload.pull_request?.head.sha,
-              title: payload.pull_request?.title,
-              author: payload.pull_request?.user.login
-            });
-
-            logger.info({ 
-              pr: prNumber, 
-              containerId, 
-              hostPort 
-            }, '✅ Build completed successfully - deployment is running');
-          } else {
-            throw new Error('Failed to parse container information from build output');
-          }
-        } else {
-          throw new Error(`Build script failed with exit code ${result.code}`);
-        }
-      })
-      .catch(error => {
-        logger.error({ pr: prNumber, error: error.stack || error.message }, '❌ Build process failed');
-      });
+    logger.info({ 
+      pr: prNumber, 
+      jobId: job.id,
+      branch, 
+      repoURL 
+    }, '✅ Build job added to queue successfully');
 
   } catch (error: unknown) {
     const errorMessage = error instanceof Error ? error.message : 'Unknown error';
     logger.error({ pr: prNumber, error: errorMessage }, '❌ Error in create/update handler');
-    deployments.set(prNumber, {
-      ...deployments.get(prNumber),
-      status: 'failed',
-      lastError: errorMessage
-    } as DeploymentInfo);
+    
+    // Update deployment status to failed
+    try {
+      await DeploymentManager.updateDeploymentStatus(prNumber, 'failed', {
+        lastError: errorMessage
+      });
+    } catch (updateError: unknown) {
+      logger.error({ pr: prNumber, error: updateError }, '❌ Failed to update deployment status');
+    }
   }
 }
 
@@ -273,44 +240,32 @@ async function handleCreateOrUpdate(
  */
 async function handleDestroy(prNumber: number, _payload: GitHubWebhookPayload) {
   try {
-    const deployment = deployments.get(prNumber);
+    const deployment = await DeploymentManager.getDeployment(prNumber);
     
     if (!deployment || !deployment.containerId) {
       logger.warn({ pr: prNumber }, '⚠️ No deployment found to destroy');
       return;
     }
 
-    // Update deployment status
-    deployments.set(prNumber, {
-      ...deployment,
-      status: 'destroying'
-    });
+    // Update deployment status to destroying
+    await DeploymentManager.updateDeploymentStatus(prNumber, 'destroying');
 
     logger.info({ 
       pr: prNumber, 
       containerId: deployment.containerId 
-    }, '🗑️ Starting destroy process for PR');
+    }, '� Queuing destroy job for PR');
 
-    // Trigger destroy process asynchronously
-    worker.destroyForPR(deployment.containerId, prNumber)
-      .then(result => {
-        if (result.code === 0) {
-          deployments.delete(prNumber);
-          logger.info({ 
-            pr: prNumber, 
-            containerId: deployment.containerId 
-          }, '✅ Deployment destroyed successfully');
-        } else {
-          throw new Error(`Destroy script failed with exit code ${result.code}`);
-        }
-      })
-      .catch(error => {
-        logger.error({ 
-          pr: prNumber, 
-          containerId: deployment.containerId, 
-          error: error.message 
-        }, '❌ Destroy process failed');
-      });
+    // Add destroy job to queue
+    const job = await addDestroyJob({
+      prNumber,
+      containerId: deployment.containerId,
+    });
+
+    logger.info({ 
+      pr: prNumber, 
+      jobId: job.id,
+      containerId: deployment.containerId?.substring(0, 12) 
+    }, '✅ Destroy job added to queue successfully');
 
   } catch (error: unknown) {
     const errorMessage = error instanceof Error ? error.message : 'Unknown error';
@@ -320,44 +275,26 @@ async function handleDestroy(prNumber: number, _payload: GitHubWebhookPayload) {
 
 /**
  * Get deployment information for a specific PR
+ * Legacy compatibility function - now uses Redis-based DeploymentManager
  */
-export function getDeploymentInfo(prNumber: number): DeploymentInfo | undefined {
-  return deployments.get(prNumber);
+export async function getDeploymentInfo(prNumber: number): Promise<DeploymentInfo | undefined> {
+  return await DeploymentManager.getDeployment(prNumber) || undefined;
 }
 
 /**
  * Get all active deployments
+ * Legacy compatibility function - now uses Redis-based DeploymentManager
  */
-export function getAllDeployments(): Map<number, DeploymentInfo> {
-  return new Map(deployments);
+export async function getAllDeployments(): Promise<Map<number, DeploymentInfo>> {
+  return await DeploymentManager.getAllDeployments();
 }
 
 /**
  * Clean up failed or stale deployments
+ * Legacy compatibility function - now uses Redis-based DeploymentManager and job queue
  */
-export function cleanupStaleDeployments(maxAgeMs: number = 24 * 60 * 60 * 1000) {
-  const now = Date.now();
-  const stalePRs: number[] = [];
-
-  for (const [prNumber, deployment] of deployments) {
-    if ((now - deployment.createdAt) > maxAgeMs) {
-      stalePRs.push(prNumber);
-    }
-  }
-
-  stalePRs.forEach(prNumber => {
-    const deployment = deployments.get(prNumber);
-    if (deployment?.containerId) {
-      logger.info({ pr: prNumber }, '🧹 Cleaning up stale deployment');
-      worker.destroyForPR(deployment.containerId, prNumber)
-        .then(() => deployments.delete(prNumber))
-        .catch(error => logger.error({ pr: prNumber, error }, 'Failed to cleanup stale deployment'));
-    } else {
-      deployments.delete(prNumber);
-    }
-  });
-
-  return stalePRs.length;
+export async function cleanupStaleDeployments(maxAgeMs: number = 24 * 60 * 60 * 1000): Promise<number> {
+  return await DeploymentManager.cleanupStaleDeployments(maxAgeMs);
 }
 
 export default {

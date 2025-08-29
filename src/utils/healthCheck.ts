@@ -12,6 +12,9 @@ export interface HealthStatus {
       running: number;
       failed: number;
       building: number;
+      destroying: number;
+      stopped: number;
+      queued: number;
     };
     system: {
       uptime: number;
@@ -85,19 +88,23 @@ function getMemoryInfo() {
 /**
  * Analyze deployment status
  */
-function analyzeDeployments() {
-  const deployments = getAllDeployments();
+async function analyzeDeployments() {
+  const deployments = await getAllDeployments();
   const stats = {
     total: deployments.size,
     running: 0,
     failed: 0,
     building: 0,
     destroying: 0,
-    stopped: 0
+    stopped: 0,
+    queued: 0
   };
 
   for (const [, deployment] of deployments) {
-    stats[deployment.status]++;
+    const status = deployment.status;
+    if (status in stats) {
+      (stats as Record<string, number>)[status]++;
+    }
   }
 
   return stats;
@@ -117,7 +124,7 @@ export async function performHealthCheck(): Promise<HealthStatus> {
   }
 
   // Check deployments
-  const deploymentStats = analyzeDeployments();
+  const deploymentStats = await analyzeDeployments();
 
   // Check system resources
   const memoryInfo = getMemoryInfo();

@@ -10,9 +10,13 @@ import rateLimit from 'express-rate-limit';
 import logger from './utils/logger.js';
 import { verifySignature } from './middlewares/verifySignature.js';
 import { dispatchWebhookEvent, getDeploymentInfo, getAllDeployments, cleanupStaleDeployments } from './middlewares/dispatcherServer.js';
+import { getQueueStats, getJobStatus } from './lib/jobQueue.js';
+import { tunnelHealthMonitor } from './lib/tunnelHealthMonitor.js';
+import { DeploymentManager } from './lib/deploymentManager.js';
 import { performHealthCheck, logHealthStatus } from './utils/healthCheck.js';
 
 const app: Express = express();
+const HOST: string = process.env.HOST || '192.168.1.1';
 const PORT: number = Number(process.env.PORT) || 3000;
 
 // Determine whether to trust proxy headers (needed for correct client IP detection
@@ -64,8 +68,21 @@ const limiter = rateLimit({
 });
 app.use(limiter);
 
+// Serve static files (dashboard, etc.)
+app.use(express.static('public'));
+
 app.get('/', (req: Request, res: Response) => {
-	res.json({ status: 'ok', message: 'EnvZilla API server' });
+	res.json({ 
+		status: 'ok', 
+		message: 'EnvZilla API server',
+		endpoints: {
+			health: '/health',
+			deployments: '/deployments',
+			adminQueue: '/admin/queue/stats',
+			adminTunnels: '/admin/tunnels/health',
+			tunnelDashboard: '/tunnel-health.html'
+		}
+	});
 });
 
 // Health check endpoint
@@ -87,59 +104,158 @@ app.get('/health', async (req: Request, res: Response) => {
 });
 
 // Get deployment information for a specific PR
-app.get('/deployments/:prNumber', (req: Request, res: Response) => {
+app.get('/deployments/:prNumber', async (req: Request, res: Response) => {
 	const prNumber = Number(req.params.prNumber);
 	if (isNaN(prNumber)) {
 		return res.status(400).json({ error: 'Invalid PR number' });
 	}
 
-	const deployment = getDeploymentInfo(prNumber);
-	if (!deployment) {
-		return res.status(404).json({ error: 'Deployment not found' });
-	}
+	try {
+		const deployment = await getDeploymentInfo(prNumber);
+		if (!deployment) {
+			return res.status(404).json({ error: 'Deployment not found' });
+		}
 
-	res.json({
-		pr: prNumber,
-		status: deployment.status,
-		containerId: deployment.containerId,
-		hostPort: deployment.hostPort,
-		createdAt: new Date(deployment.createdAt).toISOString(),
-		branch: deployment.branch,
-		commitSha: deployment.commitSha
-	});
+		res.json({
+			pr: prNumber,
+			status: deployment.status,
+			containerId: deployment.containerId,
+			hostPort: deployment.hostPort,
+			createdAt: new Date(deployment.createdAt).toISOString(),
+			branch: deployment.branch,
+			commitSha: deployment.commitSha
+		});
+	} catch (error: unknown) {
+		logger.error({ pr: prNumber, error: error instanceof Error ? error.message : String(error) }, 'Failed to get deployment info');
+		res.status(500).json({ error: 'Internal server error' });
+	}
 });
 
 // Get all active deployments
-app.get('/deployments', (req: Request, res: Response) => {
-	const deployments = getAllDeployments();
-	const deploymentList = Array.from(deployments.entries()).map(([prNumber, deployment]) => ({
-		pr: prNumber,
-		status: deployment.status,
-		containerId: deployment.containerId,
-		hostPort: deployment.hostPort,
-		createdAt: new Date(deployment.createdAt).toISOString(),
-		branch: deployment.branch,
-		commitSha: deployment.commitSha
-	}));
+app.get('/deployments', async (req: Request, res: Response) => {
+	try {
+		const deployments = await getAllDeployments();
+		const deploymentList = Array.from(deployments.entries()).map(([prNumber, deployment]) => ({
+			pr: prNumber,
+			status: deployment.status,
+			containerId: deployment.containerId,
+			hostPort: deployment.hostPort,
+			createdAt: new Date(deployment.createdAt).toISOString(),
+			branch: deployment.branch,
+			commitSha: deployment.commitSha
+		}));
 
-	res.json({
-		count: deploymentList.length,
-		deployments: deploymentList
-	});
+		res.json({
+			count: deploymentList.length,
+			deployments: deploymentList
+		});
+	} catch (error: unknown) {
+		logger.error({ error: error instanceof Error ? error.message : String(error) }, 'Failed to get all deployments');
+		res.status(500).json({ error: 'Internal server error' });
+	}
 });
 
 // Manual cleanup endpoint for stale deployments
-app.post('/admin/cleanup', (req: Request, res: Response) => {
+app.post('/admin/cleanup', async (req: Request, res: Response) => {
 	const maxAgeHours = Number(req.query.maxAge) || 24;
 	const maxAgeMs = maxAgeHours * 60 * 60 * 1000;
 	
-	const cleanedCount = cleanupStaleDeployments(maxAgeMs);
+	try {
+		const cleanedCount = await cleanupStaleDeployments(maxAgeMs);
+		
+		res.json({
+			message: `Cleanup completed`,
+			cleanedDeployments: cleanedCount,
+			maxAgeHours
+		});
+	} catch (error: unknown) {
+		logger.error({ error: error instanceof Error ? error.message : String(error) }, 'Failed to cleanup stale deployments');
+		res.status(500).json({ error: 'Internal server error' });
+	}
+});
+
+// Job queue monitoring endpoints
+app.get('/admin/queue/stats', async (req: Request, res: Response) => {
+	try {
+		const queueStats = await getQueueStats();
+		const deploymentStats = await DeploymentManager.getDeploymentStats();
+		
+		res.json({
+			queue: queueStats,
+			deployments: deploymentStats,
+			timestamp: Date.now()
+		});
+	} catch (error: unknown) {
+		logger.error({ error: error instanceof Error ? error.message : String(error) }, 'Failed to get queue stats');
+		res.status(500).json({ error: 'Internal server error' });
+	}
+});
+
+// Get specific job status
+app.get('/admin/jobs/:jobId', async (req: Request, res: Response) => {
+	const jobId = req.params.jobId;
 	
-	res.json({
-		message: `Cleanup completed`,
-		cleanedDeployments: cleanedCount,
-		maxAgeHours
-	});
+	try {
+		const jobStatus = await getJobStatus(jobId);
+		if (!jobStatus) {
+			return res.status(404).json({ error: 'Job not found' });
+		}
+		
+		res.json(jobStatus);
+	} catch (error: unknown) {
+		logger.error({ jobId, error: error instanceof Error ? error.message : String(error) }, 'Failed to get job status');
+		res.status(500).json({ error: 'Internal server error' });
+	}
+});
+
+// Get tunnel health status for all monitored tunnels
+app.get('/admin/tunnels/health', async (req: Request, res: Response) => {
+	try {
+		const allHealth = tunnelHealthMonitor.getAllHealthStatus();
+		const summary = {
+			totalTunnels: allHealth.length,
+			healthyTunnels: allHealth.filter(h => h.isHealthy).length,
+			unhealthyTunnels: allHealth.filter(h => !h.isHealthy).length,
+			tunnels: allHealth.map(health => ({
+				url: health.url,
+				isHealthy: health.isHealthy,
+				lastChecked: health.lastChecked,
+				consecutiveFailures: health.consecutiveFailures,
+				lastError: health.lastError,
+				responseTime: health.responseTime
+			}))
+		};
+		
+		res.json(summary);
+	} catch (error: unknown) {
+		logger.error({ error: error instanceof Error ? error.message : String(error) }, 'Failed to get tunnel health status');
+		res.status(500).json({ error: 'Internal server error' });
+	}
+});
+
+// Get health status for a specific tunnel
+app.get('/admin/tunnels/health/:prNumber', async (req: Request, res: Response) => {
+	const prNumber = req.params.prNumber;
+	
+	try {
+		const allHealth = tunnelHealthMonitor.getAllHealthStatus();
+		const prTunnels = allHealth.filter(h => 
+			h.url.includes(`pr-${prNumber}`) || 
+			h.url.includes(`envzilla-pr-${prNumber}`)
+		);
+		
+		if (prTunnels.length === 0) {
+			return res.status(404).json({ error: 'No tunnels found for this PR' });
+		}
+		
+		res.json({
+			prNumber: parseInt(prNumber),
+			tunnels: prTunnels
+		});
+	} catch (error: unknown) {
+		logger.error({ prNumber, error: error instanceof Error ? error.message : String(error) }, 'Failed to get PR tunnel health status');
+		res.status(500).json({ error: 'Internal server error' });
+	}
 });
 
 // Main GitHub webhook endpoint - now uses the comprehensive event dispatcher
@@ -172,14 +288,14 @@ app.use((err: Error & { status?: number }, _req: Request, res: Response, _next: 
 	res.status(status).json({ error: message });
 });
 
-app.listen(PORT, () => {
-	logger.info({ port: PORT }, `EnvZilla sample app roaring on port http://localhost:${PORT} — press CTRL+C to calm the beast`);
+app.listen(PORT, HOST, () => {
+	logger.info({ port: PORT, host: HOST }, `EnvZilla sample app roaring on http://${HOST}:${PORT} — press CTRL+C to calm the beast`);
 	
 	// Start background cleanup job - runs every 6 hours
-	const cleanupInterval = setInterval(() => {
+	const cleanupInterval = setInterval(async () => {
 		logger.info('🧹 Running scheduled cleanup of stale deployments');
 		try {
-			const cleanedCount = cleanupStaleDeployments();
+			const cleanedCount = await cleanupStaleDeployments();
 			if (cleanedCount > 0) {
 				logger.info({ cleanedCount }, 'Scheduled cleanup completed');
 			}
