@@ -63,8 +63,8 @@ export async function startHttpTunnel(port: number, name?: string, region?: stri
       args.push('--origincert', certPath);
       logger.info({ pr: prNumber, certPath }, 'Using Cloudflare origincert for cloudflared');
     }
-  } catch (e) {
-    logger.warn({ err: e, pr: prNumber }, 'Failed to check for cloudflared origincert, continuing without it');
+  } catch (_e) {
+    logger.warn({ err: _e, pr: prNumber }, 'Failed to check for cloudflared origincert, continuing without it');
   }
 
   const childEnv = { ...process.env };
@@ -177,7 +177,7 @@ export async function stopTunnelForPR(prNumber: number): Promise<void> {
     // also terminated. Fall back to child.kill() on platforms that don't
     // support negative PIDs (Windows).
     if (child.pid && process.platform !== 'win32') {
-      try { process.kill(-child.pid); } catch (e) { child.kill(); }
+      try { process.kill(-child.pid); } catch (_e) { child.kill(); }
     } else {
       child.kill();
     }

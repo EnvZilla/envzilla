@@ -11,7 +11,7 @@ export interface TunnelHealth {
 
 class TunnelHealthMonitor {
   private healthCache = new Map<string, TunnelHealth>();
-  private monitoringIntervals = new Map<string, NodeJS.Timeout>();
+  private monitoringIntervals = new Map<string, ReturnType<typeof setInterval>>();
   
   /**
    * Start monitoring a tunnel's health in the background

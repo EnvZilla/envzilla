@@ -33,7 +33,7 @@ export interface BuildJobData {
   repoFullName?: string;
   author?: string;
   installationId?: number | string;
-  webhookPayload?: any;
+  webhookPayload?: Record<string, unknown>;
 }
 
 export interface DestroyJobData {
@@ -130,9 +130,9 @@ const jobProcessors = {
       }, '✅ Build container job completed');
 
       return result;
-    } catch (error: any) {
+    } catch (error: unknown) {
       await DeploymentManager.updateDeploymentStatus(prNumber, 'failed', {
-        lastError: error.message
+        lastError: error instanceof Error ? error.message : String(error)
       });
       throw error;
     }
@@ -175,9 +175,9 @@ const jobProcessors = {
       }, '✅ Destroy container job completed');
 
       return result;
-    } catch (error: any) {
+    } catch (error: unknown) {
       await DeploymentManager.updateDeploymentStatus(prNumber!, 'failed', {
-        lastError: `Destroy failed: ${error.message}`
+        lastError: `Destroy failed: ${error instanceof Error ? error.message : String(error)}`
       });
       throw error;
     }
@@ -218,7 +218,8 @@ export function startJobWorker() {
       throw new Error(`Unknown job type: ${job.name}`);
     }
     
-    return await processor(job as any);
+    // Type assertion is safe here since we control the job creation
+    return await processor(job as never);
   }, {
     connection: redisConfig,
     concurrency: Number(process.env.JOB_CONCURRENCY) || 3, // Process up to 3 jobs concurrently
@@ -262,7 +263,7 @@ export function stopJobWorker() {
 }
 
 // Job queue helper functions
-export async function addBuildJob(data: BuildJobData, options?: any) {
+export async function addBuildJob(data: BuildJobData, options?: Record<string, unknown>) {
   const job = await jobQueue.add(JobType.BUILD_CONTAINER, data, {
     priority: 1, // High priority for builds
     ...options,
@@ -277,7 +278,7 @@ export async function addBuildJob(data: BuildJobData, options?: any) {
   return job;
 }
 
-export async function addDestroyJob(data: DestroyJobData, options?: any) {
+export async function addDestroyJob(data: DestroyJobData, options?: Record<string, unknown>) {
   const job = await jobQueue.add(JobType.DESTROY_CONTAINER, data, {
     priority: 2, // Medium priority for destroys
     ...options,
@@ -292,7 +293,7 @@ export async function addDestroyJob(data: DestroyJobData, options?: any) {
   return job;
 }
 
-export async function addCleanupJob(data: CleanupJobData, options?: any) {
+export async function addCleanupJob(data: CleanupJobData, options?: Record<string, unknown>) {
   const job = await jobQueue.add(JobType.CLEANUP_STALE, data, {
     priority: 3, // Low priority for cleanup
     ...options,
@@ -343,7 +344,7 @@ redis.on('connect', () => {
   logger.info('📦 Connected to Redis');
 });
 
-redis.on('error', (err: any) => {
+redis.on('error', (err: Error) => {
   logger.error({ error: err.message }, '❌ Redis connection error');
 });
 

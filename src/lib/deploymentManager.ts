@@ -22,10 +22,10 @@ export class DeploymentManager {
     try {
       await redis.setex(key, this.DEPLOYMENT_TTL, data);
       logger.debug({ pr: prNumber, status: deployment.status }, '💾 Deployment saved to Redis');
-    } catch (error: any) {
+    } catch (error: unknown) {
       logger.error({ 
         pr: prNumber, 
-        error: error.message 
+        error: error instanceof Error ? error.message : String(error)
       }, '❌ Failed to save deployment to Redis');
       throw error;
     }
@@ -46,10 +46,10 @@ export class DeploymentManager {
       const deployment = JSON.parse(data) as DeploymentInfo;
       logger.debug({ pr: prNumber, status: deployment.status }, '📖 Deployment loaded from Redis');
       return deployment;
-    } catch (error: any) {
+    } catch (error: unknown) {
       logger.error({ 
         pr: prNumber, 
-        error: error.message 
+        error: error instanceof Error ? error.message : String(error)
       }, '❌ Failed to load deployment from Redis');
       return null;
     }
@@ -65,10 +65,10 @@ export class DeploymentManager {
       const result = await redis.del(key);
       logger.debug({ pr: prNumber }, '🗑️ Deployment deleted from Redis');
       return result > 0;
-    } catch (error: any) {
+    } catch (error: unknown) {
       logger.error({ 
         pr: prNumber, 
-        error: error.message 
+        error: error instanceof Error ? error.message : String(error) 
       }, '❌ Failed to delete deployment from Redis');
       return false;
     }
@@ -99,10 +99,10 @@ export class DeploymentManager {
             const prNumber = this.extractPRNumber(key);
             const deployment = JSON.parse(value) as DeploymentInfo;
             deployments.set(prNumber, deployment);
-          } catch (parseError: any) {
+          } catch (parseError: unknown) {
             logger.warn({ 
               key, 
-              error: parseError.message 
+              error: parseError instanceof Error ? parseError.message : String(parseError)
             }, '⚠️ Failed to parse deployment data');
           }
         }
@@ -110,9 +110,9 @@ export class DeploymentManager {
 
       logger.debug({ count: deployments.size }, '📊 Loaded all deployments from Redis');
       return deployments;
-    } catch (error: any) {
+    } catch (error: unknown) {
       logger.error({ 
-        error: error.message 
+        error: error instanceof Error ? error.message : String(error)
       }, '❌ Failed to load all deployments from Redis');
       return deployments;
     }
@@ -190,10 +190,10 @@ export class DeploymentManager {
           cleanedCount++;
           logger.info({ pr: prNumber }, '🧹 Stale deployment marked for cleanup');
         }
-      } catch (error: any) {
+      } catch (error: unknown) {
         logger.error({ 
           pr: prNumber, 
-          error: error.message 
+          error: error instanceof Error ? error.message : String(error)
         }, '❌ Failed to cleanup stale deployment');
       }
     }
@@ -226,7 +226,7 @@ export class DeploymentManager {
   /**
    * Health check for deployment manager
    */
-  static async healthCheck(): Promise<{ status: 'healthy' | 'unhealthy'; details: any }> {
+  static async healthCheck(): Promise<{ status: 'healthy' | 'unhealthy'; details: Record<string, unknown> }> {
     try {
       // Test Redis connection
       await redis.ping();
@@ -241,12 +241,12 @@ export class DeploymentManager {
           deployments: stats,
         },
       };
-    } catch (error: any) {
+    } catch (error: unknown) {
       return {
         status: 'unhealthy',
         details: {
           redis: 'disconnected',
-          error: error.message,
+          error: error instanceof Error ? error.message : String(error),
         },
       };
     }

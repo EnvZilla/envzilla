@@ -103,7 +103,7 @@ async function analyzeDeployments() {
   for (const [, deployment] of deployments) {
     const status = deployment.status;
     if (status in stats) {
-      (stats as any)[status]++;
+      (stats as Record<string, number>)[status]++;
     }
   }
 

@@ -31,7 +31,7 @@ async function startWorkerProcess() {
     logger.info({ details: health.details }, '✅ Deployment manager health check passed');
 
     // Start the job worker
-    const worker = startJobWorker();
+    const _worker = startJobWorker();
     
     logger.info({
       pid: process.pid,
@@ -49,8 +49,8 @@ async function startWorkerProcess() {
           queue: queueStats,
           deployments: deploymentStats
         }, '📊 Worker statistics');
-      } catch (error: any) {
-        logger.error({ error: error.message }, '❌ Failed to get worker statistics');
+      } catch (error: unknown) {
+        logger.error({ error: error instanceof Error ? error.message : String(error) }, '❌ Failed to get worker statistics');
       }
     }, 60000); // Every minute
 
@@ -78,8 +78,8 @@ async function startWorkerProcess() {
 
         logger.info('✅ Graceful shutdown completed');
         process.exit(0);
-      } catch (error: any) {
-        logger.error({ error: error.message }, '❌ Error during shutdown');
+      } catch (error: unknown) {
+        logger.error({ error: error instanceof Error ? error.message : String(error) }, '❌ Error during shutdown');
         process.exit(1);
       }
     };
@@ -105,10 +105,10 @@ async function startWorkerProcess() {
       process.exit(1);
     });
 
-  } catch (error: any) {
+  } catch (error: unknown) {
     logger.error({ 
-      error: error.message, 
-      stack: error.stack 
+      error: error instanceof Error ? error.message : String(error), 
+      stack: error instanceof Error ? error.stack : undefined
     }, '💥 Failed to start worker process');
     process.exit(1);
   }

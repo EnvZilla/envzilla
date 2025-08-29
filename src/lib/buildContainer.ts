@@ -20,7 +20,7 @@ const DOCKER_CONFIG = {
 /**
  * Configuration for preview URL health checks.
  */
-const HEALTH_CHECK_CONFIG = {
+const _HEALTH_CHECK_CONFIG = {
     // URL response timeout (configurable via env)
     urlTimeoutMs: Number(process.env.PREVIEW_URL_TIMEOUT_MS) || 50_000, // 50 seconds total
     attempts: Number(process.env.PREVIEW_URL_ATTEMPTS) || 10,
