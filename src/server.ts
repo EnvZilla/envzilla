@@ -326,5 +326,13 @@ app.listen(PORT, HOST, () => {
 	process.on('SIGINT', shutdown);
 });
 
+// Start the server
+app.listen(PORT, HOST, () => {
+	logger.info({ port: PORT, host: HOST }, '🚀 EnvZilla server started successfully');
+}).on('error', (error: NodeJS.ErrnoException) => {
+	logger.error({ error: error.message, port: PORT, host: HOST }, '❌ Failed to start server');
+	process.exit(1);
+});
+
 export default app;
 
